@@ -1,0 +1,21 @@
+[project]
+name = "sky-burrito"
+version = "0.1.0"
+description = "SF inter-district drone delivery network — spatial siting and dynamic network modeling"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "geopandas>=0.14",
+    "shapely>=2.0",
+    "osmnx>=1.9",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "jupyter>=1.0",
+    "ipykernel>=6.0",
+]
