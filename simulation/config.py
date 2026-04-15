@@ -26,8 +26,10 @@ SIM_DURATION_S: float = 3 * 3600
 
 MAP_CENTER_LAT: float = 37.758
 MAP_CENTER_LON: float = -122.422
-MAP_ZOOM: int = 13
-MAP_PITCH: int = 45   # degrees tilt for 3-D feel
+MAP_ZOOM: float = 12.7
+MAP_PITCH: int = 38   # degrees tilt for 3-D feel
+MAP_BEARING: int = -8
+MAP_STYLE: str = "light"
 
 
 # ── Drone physics (mirrors drone_model.py defaults) ──────────────────────────
