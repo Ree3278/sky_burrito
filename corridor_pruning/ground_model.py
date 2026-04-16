@@ -30,7 +30,9 @@ Missing inputs
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Dict
+
+from .driver_economics import calculate_uber_payout, DriverEconomicsSpec
 
 if TYPE_CHECKING:
     import networkx as nx
@@ -71,6 +73,8 @@ class GroundResult:
     traffic_penalty_s: float
     total_time_s:      float
     energy_wh:         float
+    uber_payout_breakdown: Dict[str, float]  # Output from calculate_uber_payout()
+    total_cost_usd:    float                 # What we compare to drone
     used_stub:         bool        # True until OSMnx mode is implemented
 
 
@@ -81,9 +85,11 @@ def estimate_ground(
     origin_lon: float = 0.0,
     dest_lat: float = 0.0,
     dest_lon: float = 0.0,
+    driver_spec: DriverEconomicsSpec = DriverEconomicsSpec(),
+    sim_hour: int = 19,
 ) -> GroundResult:
     """
-    Estimate ground courier travel time and energy for one corridor.
+    Estimate ground courier travel time, energy, and Uber payout for one corridor.
 
     Parameters
     ----------
@@ -94,6 +100,10 @@ def estimate_ground(
         ⚠ Pass the real graph once data_processing.load_street_network() is called.
     origin_lat, origin_lon, dest_lat, dest_lon : float
         Hub coordinates — needed for OSMnx nearest-node lookup (future use).
+    driver_spec : DriverEconomicsSpec
+        Uber's payout formula. Default models Friday evening peak.
+    sim_hour : int
+        Hour (0-23) for surge pricing. Default 19 (7 PM Friday).
 
     Returns
     -------
@@ -124,6 +134,17 @@ def estimate_ground(
 
     energy_wh         = road_distance_km * CAR_ENERGY_WH_PER_KM
 
+    # Calculate Uber payout for this route
+    travel_time_minutes = total_time_s / 60
+    distance_miles = road_distance_m / 1609.34
+    
+    uber_payout = calculate_uber_payout(
+        travel_time_minutes = travel_time_minutes,
+        distance_miles      = distance_miles,
+        hour_of_day         = sim_hour,
+        spec                = driver_spec,
+    )
+
     return GroundResult(
         road_distance_m      = road_distance_m,
         detour_ratio         = DETOUR_FACTOR,
@@ -132,5 +153,7 @@ def estimate_ground(
         traffic_penalty_s    = traffic_penalty_s,
         total_time_s         = total_time_s,
         energy_wh            = energy_wh,
+        uber_payout_breakdown = uber_payout,
+        total_cost_usd       = uber_payout['total_uber_payout'],
         used_stub            = True,
     )
