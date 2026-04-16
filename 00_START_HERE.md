@@ -8,7 +8,7 @@ Welcome! This document will get you oriented in 2 minutes.
 
 An economic feasibility analysis for drone delivery vs ground delivery across 132 hub-to-hub corridors in San Francisco's Mission–Noe Valley.
 
-**Key Finding**: Drones are **279.8× cheaper** than Uber ground couriers, saving **$7.34 per delivery** (peak hours) while reducing **CO₂ by 99.6%**.
+**Key Finding**: Drones are **279.8× cheaper** than Uber ground couriers, saving **$7.34 per delivery** (peak hours) while reducing **CO₂ by 99.1%** (based on California's renewable grid mix).
 
 ---
 

@@ -1,103 +1,150 @@
 # 📚 Sky Burrito Documentation Index
 
-## Quick Navigation
-
-### 🚀 For Quick Start
-1. **QUICK_START.md** - Usage examples, common queries, troubleshooting
-   - How to run the analysis
-   - Understanding the output
-   - Common questions answered
-
-### 📋 For Complete Overview
-1. **DELIVERY_COMPLETE.md** - Full delivery summary (Phase 1 + Phase 2)
-   - What was delivered
-   - All files created/modified
-   - Test results
-   - Usage examples
-
-2. **IMPLEMENTATION_NOTES.md** - Technical deep-dive (both phases)
-   - Detailed file-by-file implementation
-   - Code snippets and formulas
-   - Phase 1: Uber Economics
-   - Phase 2: Carbon + Obstacles + Energy
-
-### 🔧 For Technical Details
-1. **ENHANCEMENTS_SUMMARY.md** - Phase 2 specifications
-   - New modules: carbon_footprint.py, obstacles.py
-   - Enhanced modules: drone_model.py, pruning.py
-   - Integration points
-   - Pending work (OSMnx)
-
-2. **DELIVERY_SUMMARY.md** - Quick reference for Phase 2
-   - What was delivered
-   - How to use
-   - Metrics explained
-   - Troubleshooting
-
-### 📖 For Project Context
-1. **README.md** - Project overview
-   - What is Sky Burrito?
-   - Architecture (5 phases)
-   - How to get started
+**Last Updated:** April 16, 2026  
+**Status:** ✅ Complete with Phase 2 + CO₂ Integration
 
 ---
 
-## Document Details
+## 🎯 Quick Navigation by Purpose
 
-| Document | Purpose | Audience | Length |
-|----------|---------|----------|--------|
-| **QUICK_START.md** | How to use the system | All users | 7 KB |
-| **DELIVERY_COMPLETE.md** | What was delivered | Product team | 11 KB |
-| **IMPLEMENTATION_NOTES.md** | Technical details | Engineers | 13 KB |
-| **ENHANCEMENTS_SUMMARY.md** | Phase 2 specs | Engineers | 9.3 KB |
-| **DELIVERY_SUMMARY.md** | Phase 2 reference | All users | 7 KB |
-| **README.md** | Project overview | All | 7 KB |
+### "I just want to run the code" (5 min)
+→ **QUICK_START.md** - Copy-paste examples with CO₂ data
 
----
+### "What was delivered?" (10 min)
+→ **DELIVERY_COMPLETE.md** - Checklist of all Phase 1 + Phase 2 items
 
-## By Use Case
+### "How does it work technically?" (20 min)
+→ **IMPLEMENTATION_NOTES.md** - Deep-dive into each module
 
-### "I want to run the analysis and see results"
-→ Read **QUICK_START.md** (5 min)
-→ Run: `python -c "from corridor_pruning.pruning import prune_corridors; prune_corridors()"`
+### "Where do I find everything?" (5 min)
+→ **THIS FILE** - Documentation index with cross-references
 
-### "I want to understand what was built"
-→ Read **DELIVERY_COMPLETE.md** (10 min)
-→ Skim **IMPLEMENTATION_NOTES.md** (10 min)
+### "Is CO₂ really integrated?" (5 min)
+→ **CO2_INTEGRATION_STATUS.md** - Verification that CO₂ works ✅ **NEW**
 
-### "I need to integrate this with other systems"
-→ Read **ENHANCEMENTS_SUMMARY.md** (15 min)
-→ Review **IMPLEMENTATION_NOTES.md** (15 min)
-→ Check source code docstrings (5 min)
+### "How do I understand all the pieces?" (30 min)
+→ **UPDATE_SUMMARY.md** - Comprehensive reference with formulas
 
-### "I want to extend/modify the code"
-→ Read **IMPLEMENTATION_NOTES.md** for architecture (20 min)
-→ Review source code docstrings in `corridor_pruning/` (20 min)
-→ Check `test_enhancements.py` for examples (10 min)
+### "What's the big picture?" (2 min)
+→ **00_START_HERE.md** - Quick orientation, decision tree
 
-### "Something broke, what do I do?"
-→ Check **QUICK_START.md** Troubleshooting section (5 min)
-→ Run `python test_enhancements.py` to validate (2 min)
-→ Check error in source with docstrings (5 min)
+### "Tell me about the project" (10 min)
+→ **README.md** - Overview, architecture, data sources
+
+### "What's a good next step?" (15 min)
+→ **MASTER_DOCUMENTATION.md** - Guide to all documents ✅ **NEW**
+
+### "What about all 132 possible routes?" (30 min)
+→ **ALL_132_ROUTES_ANALYSIS.md** - Complete analysis of every route combination ✅ **NEW**
+
+### "I need detailed calculations on every viable route" (45 min)
+→ **COMPLETE_ROUTE_CALCULATIONS.md** - Full metrics for the 20 viable routes ✅ **NEW**
 
 ---
 
-## What Each Document Covers
+## 📑 All Documentation Files
 
-### QUICK_START.md
-- Running the analysis (with/without CSV)
-- Understanding output tables and metrics
-- Accessing individual fields
-- Common questions (Q&A format)
-- Troubleshooting (error → solution)
-- Default parameters
-- Performance notes
-- File structure
+### Entry Points (Start Here)
 
-### DELIVERY_COMPLETE.md
-- **PHASE 1**: What was delivered for Uber economics
-  - Files created/modified
-  - Key features
+| File | Purpose | Read Time | Status |
+|------|---------|-----------|--------|
+| **00_START_HERE.md** | 2-minute orientation | 2 min | ✅ Current |
+| **README.md** | Project overview & architecture | 10 min | ✅ Current |
+| **MASTER_DOCUMENTATION.md** | Guide to all documents | 15 min | ✅ NEW |
+
+### Usage & Implementation
+
+| File | Purpose | Read Time | Audience |
+|------|---------|-----------|----------|
+| **QUICK_START.md** | How to run + examples | 5 min | Everyone |
+| **IMPLEMENTATION_NOTES.md** | Technical details | 20 min | Developers |
+| **UPDATE_SUMMARY.md** | Comprehensive reference | 30 min | Reference |
+
+### Status & Delivery
+
+| File | Purpose | Read Time | Audience |
+|------|---------|-----------|----------|
+| **DELIVERY_COMPLETE.md** | What was delivered | 10 min | Project managers |
+| **DELIVERY_SUMMARY.md** | Phase 2 results | 15 min | Stakeholders |
+| **ENHANCEMENTS_SUMMARY.md** | Technical specs | 15 min | Architects |
+| **CO2_INTEGRATION_STATUS.md** | CO₂ verification | 5 min | Verification | ✅ NEW |
+
+### Route Analysis (NEW!)
+
+| File | Purpose | Routes Covered | Read Time | Audience |
+|------|---------|-----------------|-----------|----------|
+| **ALL_132_ROUTES_ANALYSIS.md** | All possible routes with viability assessment | 132 | 45 min | Decision makers |
+| **COMPLETE_ROUTE_CALCULATIONS.md** | Detailed metrics on viable routes | 20 viable | 40 min | Planners |
+| **ROUTE_COMPARISON.md** | Best vs worst viable route comparison | 2 routes | 10 min | Understanding |
+| **ROUTE_ANALYSIS_GUIDE.md** | Strategic analysis framework | 20 viable | 15 min | Strategy |
+| **ROUTES_DOCUMENTATION_INDEX.md** | Navigation guide for all route docs | Reference | 10 min | Finding docs | ✅ NEW |
+
+### Reference
+
+| File | Purpose | Status |
+|------|---------|--------|
+| **DOCUMENTATION_INDEX.md** | This file - navigation guide | ✅ Current |
+| **SOTU/corridor_pruning.md** | Corridor pruning architecture | ✅ Reference |
+| **SOTU/hub_sizing.md** | Hub sizing architecture | ✅ Reference |
+
+---
+
+## 📊 Document Hierarchy
+
+```
+START HERE (2 min)
+    ├─→ 00_START_HERE.md
+    │
+    ├─ "I want to run it"
+    │  └─→ QUICK_START.md (5 min)
+    │
+    ├─ "I want to understand the business case"
+    │  └─→ DELIVERY_SUMMARY.md (15 min)
+    │
+    ├─ "I want to verify CO₂ works"
+    │  └─→ CO2_INTEGRATION_STATUS.md (5 min)
+    │
+    ├─ "I want to understand the code"
+    │  └─→ IMPLEMENTATION_NOTES.md (20 min)
+    │
+    └─ "I want everything documented"
+       └─→ UPDATE_SUMMARY.md (30 min)
+```
+
+---
+
+## Cross-References: Where to Find What
+
+### "How do I calculate costs?"
+- QUICK_START.md → "Understanding Output" section
+- IMPLEMENTATION_NOTES.md → "Key Features" section
+- UPDATE_SUMMARY.md → "Module 1: driver_economics.py"
+
+### "Where are the CO₂ numbers?"
+- CO2_INTEGRATION_STATUS.md → Full verification
+- DELIVERY_SUMMARY.md → "2a. Carbon Footprint Tracking"
+- UPDATE_SUMMARY.md → "Key Metrics & Constants" section
+- QUICK_START.md → "Environmental Metrics" table
+
+### "What's the scoring formula?"
+- UPDATE_SUMMARY.md → "Composite Scoring Function"
+- IMPLEMENTATION_NOTES.md → "Composite Score Weighting"
+- README.md → "Implementation Phases" section
+
+### "How do I use the building heights?"
+- QUICK_START.md → "With Real Building Heights" example
+- UPDATE_SUMMARY.md → "Module 5: obstacles.py"
+- CO2_INTEGRATION_STATUS.md → "Phase 2b: Building Obstacles"
+
+### "What data sources are used?"
+- UPDATE_SUMMARY.md → "Key Metrics & Constants" (all cited)
+- README.md → "Data Sources" section
+- DELIVERY_SUMMARY.md → "Phase 2: Environmental" section
+
+### "How do I troubleshoot errors?"
+- QUICK_START.md → "Troubleshooting" section
+- IMPLEMENTATION_NOTES.md → "Testing & Validation"
+- README.md → "Setup" section
   - Example output
   - Test results
   - Notes and limitations
