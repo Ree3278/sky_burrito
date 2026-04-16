@@ -1,14 +1,21 @@
-# Implementation Summary: Uber Platform Economics
+# Implementation Summary: Sky Burrito Complete System
 
-**Date:** April 14, 2026  
+**Date:** April 16, 2026  
 **Branch:** `ryan`  
-**Status:** ✅ Complete
+**Status:** ✅ Phase 1 + Phase 2 Complete (Including CO₂ Integration)
 
 ---
 
-## What Was Implemented
+## Executive Summary
 
-A complete **Uber-style driver economics module** for the corridor pruning pipeline that calculates costs for ground delivery vs drone delivery.
+Two major implementation phases were completed, with Phase 2 fully integrated into the core scoring logic:
+
+**Phase 1**: Uber-style driver economics (ground delivery cost model)  
+**Phase 2**: Environmental & physics analysis (CO₂ tracking + real obstacles + energy decomposition)
+
+The final integration step (April 16) wired CO₂ reduction into the composite scoring formula with 20% weight (alongside 60% cost, 20% time).
+
+**Result**: 20 viable corridors ranked by: **60% economic benefit + 20% time savings + 20% environmental impact**
 
 ### Files Created/Modified
 
