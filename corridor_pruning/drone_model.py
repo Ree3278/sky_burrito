@@ -67,8 +67,13 @@ class DroneResult:
     total_time_s:      float
     climb_energy_wh:   float
     cruise_energy_wh:  float
+    descend_energy_wh: float   # gravitational assist: smaller than climb
     total_energy_wh:   float
+    climb_cost_usd:    float   # Component: ascent electricity
+    cruise_cost_usd:   float   # Component: horizontal flight
+    descend_cost_usd:  float   # Component: descent (minimal, gravity helps)
     used_fallback_altitude: bool
+    total_cost_usd:    float   # Total: climb + cruise + descend
 
 
 def estimate_drone(
@@ -77,7 +82,7 @@ def estimate_drone(
     spec: DroneSpec = DroneSpec(),
 ) -> DroneResult:
     """
-    Estimate drone flight time and energy for one corridor.
+    Estimate drone flight time, energy, and cost for one corridor.
 
     Parameters
     ----------
@@ -93,7 +98,7 @@ def estimate_drone(
 
     Returns
     -------
-    DroneResult
+    DroneResult with total_cost_usd calculated from energy consumption
     """
     used_fallback = obstacle_height_m is None
     if used_fallback:
@@ -109,7 +114,26 @@ def estimate_drone(
     # E_climb = mgh / (η × 3600 J/Wh)
     climb_energy_wh  = (spec.mass_kg * GRAVITY_MS2 * cruise_alt) / (spec.motor_efficiency * 3600)
     cruise_energy_wh = spec.cruise_power_w * (cruise_time_s / 3600)
-    total_energy_wh  = climb_energy_wh + cruise_energy_wh
+    
+    # Descent with gravity assist: ~25% of climb energy (rotors mainly stabilizing)
+    descend_energy_wh = climb_energy_wh * 0.25
+    
+    total_energy_wh  = climb_energy_wh + cruise_energy_wh + descend_energy_wh
+
+    # Calculate cost based on electricity consumption (SF grid: $0.12/kWh)
+    electricity_cost_per_kwh = 0.12
+    climb_cost_usd = (climb_energy_wh / 1000) * electricity_cost_per_kwh
+    cruise_cost_usd = (cruise_energy_wh / 1000) * electricity_cost_per_kwh
+    descend_cost_usd = (descend_energy_wh / 1000) * electricity_cost_per_kwh
+    battery_cost = climb_cost_usd + cruise_cost_usd + descend_cost_usd
+    
+    # Maintenance cost per mile (~$0.016/mile for DJI Matrice 350 RTK)
+    maintenance_cost_per_mile = 0.016
+    distance_miles = straight_line_m / 1609.34
+    maintenance_cost = distance_miles * maintenance_cost_per_mile
+    
+    # Total cost to operator
+    total_cost_usd = battery_cost + maintenance_cost
 
     return DroneResult(
         cruise_altitude_m      = cruise_alt,
@@ -119,6 +143,11 @@ def estimate_drone(
         total_time_s           = total_time_s,
         climb_energy_wh        = climb_energy_wh,
         cruise_energy_wh       = cruise_energy_wh,
+        descend_energy_wh      = descend_energy_wh,
         total_energy_wh        = total_energy_wh,
+        climb_cost_usd         = climb_cost_usd,
+        cruise_cost_usd        = cruise_cost_usd,
+        descend_cost_usd       = descend_cost_usd,
         used_fallback_altitude = used_fallback,
+        total_cost_usd         = total_cost_usd,
     )
