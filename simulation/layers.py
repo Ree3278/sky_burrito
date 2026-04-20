@@ -25,7 +25,10 @@ if TYPE_CHECKING:
 
 # ── Corridors ─────────────────────────────────────────────────────────────────
 
-def corridor_arc_layer(shortlist: "List[ScoredCorridor]") -> pdk.Layer:
+def corridor_arc_layer(
+    shortlist: "List[ScoredCorridor]",
+    highlighted_label: str | None = None,
+) -> pdk.Layer:
     """Static ArcLayer showing all active shortlisted corridors."""
     max_weight = max((sc.demand_weight for sc in shortlist), default=1.0)
     data = [
@@ -36,7 +39,14 @@ def corridor_arc_layer(shortlist: "List[ScoredCorridor]") -> pdk.Layer:
             "dest_lon":    sc.corridor.destination.lon,
             "label":       sc.corridor.label,
             "time_delta_min": round(sc.time_delta_s / 60, 1),
-            "width":       1.2 + 3.2 * (sc.demand_weight / max_weight),
+            "score":       round(sc.composite_score),
+            "energy_ratio": round(sc.energy_ratio, 2),
+            "width": (
+                6.0 if sc.corridor.label == highlighted_label
+                else 1.2 + 3.2 * (sc.demand_weight / max_weight)
+            ),
+            "source_color": [22, 78, 255, 220] if sc.corridor.label == highlighted_label else COLOR_CORRIDOR_ARC,
+            "target_color": [255, 153, 51, 215] if sc.corridor.label == highlighted_label else [160, 220, 255, 80],
         }
         for sc in shortlist
     ]
@@ -45,8 +55,8 @@ def corridor_arc_layer(shortlist: "List[ScoredCorridor]") -> pdk.Layer:
         data=data,
         get_source_position=["origin_lon", "origin_lat"],
         get_target_position=["dest_lon", "dest_lat"],
-        get_source_color=COLOR_CORRIDOR_ARC,
-        get_target_color=[160, 220, 255, 80],
+        get_source_color="source_color",
+        get_target_color="target_color",
         get_width="width",
         pickable=True,
         auto_highlight=True,
@@ -217,7 +227,6 @@ def saturated_hub_ring_layer(
 
 
 # ── Drones ────────────────────────────────────────────────────────────────────
-
 def drone_layer(snapshot: "SimSnapshot") -> pdk.Layer:
     """
     ScatterplotLayer for all active drones.

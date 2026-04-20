@@ -166,11 +166,115 @@ st.markdown(
         box-shadow: 0 24px 60px rgba(40, 58, 86, 0.12);
         margin-bottom: 1rem;
     }
+    .featured-route {
+        background: linear-gradient(135deg, rgba(18, 35, 60, 0.96), rgba(34, 84, 148, 0.92));
+        border: 1px solid rgba(101, 147, 210, 0.30);
+        border-radius: 28px;
+        padding: 1.15rem 1.25rem;
+        box-shadow: 0 26px 70px rgba(20, 45, 84, 0.18);
+        color: #f4f8fd;
+        margin: 0.2rem 0 1rem;
+        overflow: hidden;
+        position: relative;
+    }
+    .featured-route::after {
+        content: "";
+        position: absolute;
+        inset: auto -8% -28% auto;
+        width: 220px;
+        height: 220px;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(255, 176, 73, 0.34), rgba(255, 176, 73, 0.02) 68%);
+        pointer-events: none;
+    }
+    .featured-kicker {
+        font-size: 0.78rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        font-weight: 800;
+        color: #b9d5fb;
+        margin-bottom: 0.28rem;
+    }
+    .featured-title {
+        font-size: clamp(1.55rem, 3vw, 2.35rem);
+        font-weight: 800;
+        line-height: 1.02;
+        margin: 0 0 0.45rem;
+        letter-spacing: -0.03em;
+    }
+    .featured-copy {
+        color: rgba(240, 246, 255, 0.90);
+        font-size: 1rem;
+        line-height: 1.5;
+        max-width: 52rem;
+        margin: 0 0 0.95rem;
+    }
+    .featured-metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.7rem;
+    }
+    .featured-metric {
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 18px;
+        padding: 0.8rem 0.9rem;
+        backdrop-filter: blur(8px);
+    }
+    .featured-metric-label {
+        color: rgba(215, 230, 255, 0.80);
+        font-size: 0.74rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+    }
+    .featured-metric-value {
+        color: #ffffff;
+        font-size: 1.28rem;
+        font-weight: 800;
+        line-height: 1.05;
+    }
+    .route-card {
+        background: rgba(255, 255, 255, 0.82);
+        border: 1px solid rgba(54, 82, 110, 0.10);
+        border-radius: 18px;
+        padding: 0.9rem 1rem;
+        box-shadow: 0 14px 36px rgba(34, 51, 84, 0.08);
+        margin-bottom: 0.75rem;
+    }
+    .route-card.route-card-active {
+        border-color: rgba(255, 153, 51, 0.75);
+        box-shadow: 0 18px 40px rgba(255, 153, 51, 0.16);
+        background: linear-gradient(180deg, rgba(255, 250, 242, 0.98), rgba(255, 255, 255, 0.90));
+    }
+    .route-rank {
+        color: #5e7288;
+        font-size: 0.75rem;
+        font-weight: 800;
+        letter-spacing: 0.10em;
+        text-transform: uppercase;
+        margin-bottom: 0.18rem;
+    }
+    .route-title {
+        color: #172335;
+        font-size: 1.02rem;
+        font-weight: 800;
+        margin-bottom: 0.35rem;
+    }
+    .route-meta {
+        color: #5f7389;
+        font-size: 0.9rem;
+        line-height: 1.5;
+    }
     @media (max-width: 900px) {
         .sim-hero {
             display: block;
         }
         .sim-status-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .featured-metrics {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
     }
@@ -246,11 +350,26 @@ if "snapshot" not in st.session_state:
 
 # ── Button logic ─────────────────────────────────────────────────────────────
 shortlist, sizing = load_network(demand_scale, use_auto_swap)
+top_routes = shortlist[:10]
 
 if pad_override > 0:
     for r in sizing:
         r.k_pads = pad_override
         r.k_bays = pad_override
+
+if "selected_route_label" not in st.session_state and top_routes:
+    st.session_state.selected_route_label = top_routes[0].corridor.label
+elif top_routes and st.session_state.selected_route_label not in {r.corridor.label for r in top_routes}:
+    st.session_state.selected_route_label = top_routes[0].corridor.label
+
+
+def _selected_route():
+    for rank, route in enumerate(top_routes, start=1):
+        if route.corridor.label == st.session_state.get("selected_route_label"):
+            return rank, route
+    if top_routes:
+        return 1, top_routes[0]
+    return None, None
 
 if btn_reset or (btn_start and st.session_state.registry is None):
     clock = SimClock(time_multiplier=time_mult)
@@ -297,10 +416,11 @@ st.markdown(
 
 map_placeholder     = st.empty()
 metrics_placeholder = st.empty()
+story_placeholder   = st.empty()
 
 # ── Initial / static map (shown before simulation starts) ────────────────────
 def _initial_view() -> pdk.Deck:
-    arc_layer   = corridor_arc_layer(shortlist)
+    arc_layer   = corridor_arc_layer(shortlist, st.session_state.selected_route_label)
     hub_layer   = hub_scatter_layer(sizing, {}, HUB_LOOKUP)
     label_layer = hub_label_layer(sizing, HUB_LOOKUP)
     return pdk.Deck(
@@ -316,14 +436,14 @@ def _initial_view() -> pdk.Deck:
         map_style=MAP_STYLE,
         tooltip={
             "html": "<b>{label}</b><br/>Δt saved: {time_delta_min} min<br/>"
-                    "Hub {hub_id} — {tier} tier<br/>{k_pads} pads  util: {util_pct}%",
+                    "Energy edge: {energy_ratio}×<br/>Composite score: {score}",
             "style": {"backgroundColor": "#102033", "color": "white"},
         },
     )
 
 
 def _live_view(snapshot) -> pdk.Deck:
-    arc_layer    = corridor_arc_layer(shortlist)
+    arc_layer    = corridor_arc_layer(shortlist, st.session_state.selected_route_label)
     hub_s_layer  = hub_scatter_layer(sizing, snapshot.hub_metrics, HUB_LOOKUP)
     label_layer  = hub_label_layer(sizing, HUB_LOOKUP)
     halo_layer   = saturated_hub_ring_layer(sizing, snapshot.hub_metrics, HUB_LOOKUP)
@@ -350,6 +470,49 @@ def _live_view(snapshot) -> pdk.Deck:
             "style": {"backgroundColor": "#102033", "color": "white"},
         },
     )
+
+
+def _render_featured_route() -> None:
+    with story_placeholder.container():
+        rank, route = _selected_route()
+        if not route:
+            st.caption("No featured route is available yet.")
+            return
+
+        story = (
+            "This corridor is featured because it combines strong demand, meaningful time savings, "
+            "and a clear energy advantage over ground delivery."
+        )
+        st.markdown(
+            f"""
+            <div class="featured-route">
+              <div class="featured-kicker">Featured Route</div>
+              <div class="featured-title">{route.corridor.label}</div>
+              <p class="featured-copy">
+                {story}
+              </p>
+              <div class="featured-metrics">
+                <div class="featured-metric">
+                  <div class="featured-metric-label">Top-10 Rank</div>
+                  <div class="featured-metric-value">#{rank}</div>
+                </div>
+                <div class="featured-metric">
+                  <div class="featured-metric-label">Time Saved</div>
+                  <div class="featured-metric-value">{route.time_delta_s / 60:.1f} min</div>
+                </div>
+                <div class="featured-metric">
+                  <div class="featured-metric-label">Energy Advantage</div>
+                  <div class="featured-metric-value">{route.energy_ratio:.2f}x</div>
+                </div>
+                <div class="featured-metric">
+                  <div class="featured-metric-label">Demand Weight</div>
+                  <div class="featured-metric-value">{route.demand_weight:,}</div>
+                </div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def _render_metrics(snapshot) -> None:
@@ -396,9 +559,41 @@ def _render_metrics(snapshot) -> None:
                 delta_color="inverse",
             )
 
+        st.divider()
+        st.markdown("**Supporting Top 10 corridor list**")
+        route_options = {route.corridor.label: route for route in top_routes}
+
+        if route_options:
+            st.selectbox(
+                "Featured route on map",
+                options=list(route_options.keys()),
+                key="selected_route_label",
+                help="Choose which top-ranked corridor is featured in the story panel and highlighted on the map.",
+            )
+            for rank, route in enumerate(top_routes, start=1):
+                is_active = route.corridor.label == st.session_state.selected_route_label
+                st.markdown(
+                    f"""
+                    <div class="route-card {'route-card-active' if is_active else ''}">
+                      <div class="route-rank">Rank #{rank}</div>
+                      <div class="route-title">{route.corridor.label}</div>
+                      <div class="route-meta">
+                        {route.time_delta_s / 60:.1f} min faster than ground<br/>
+                        Energy advantage: {route.energy_ratio:.2f}×<br/>
+                        Demand weight: {route.demand_weight:,}<br/>
+                        Composite score: {route.composite_score:,.0f}
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No shortlisted corridors are available for ranking display.")
+
 
 # ── Render loop ───────────────────────────────────────────────────────────────
 if not st.session_state.running or st.session_state.registry is None:
+    _render_featured_route()
     with map_placeholder.container():
         st.markdown('<div class="sim-map-frame">', unsafe_allow_html=True)
         st.pydeck_chart(_initial_view())
@@ -422,6 +617,7 @@ else:
 
     st.session_state.snapshot = snapshot
 
+    _render_featured_route()
     with map_placeholder.container():
         st.markdown('<div class="sim-map-frame">', unsafe_allow_html=True)
         st.pydeck_chart(_live_view(snapshot))
