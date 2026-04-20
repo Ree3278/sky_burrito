@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.utils import FloatSchedule
 from stable_baselines3.common.vec_env import DummyVecEnv
 import tensorboard
 
@@ -119,12 +120,21 @@ def create_environment(fleet_size: int, phase: int = 1, curriculum: CurriculumCa
         fleet_size=fleet_size,
         episode_length_hours=episode_hours,
         sim_speedup=60,  # 1 minute per step
+        active_hubs=cfg['active_hubs'],
     )
     
     return env
 
 
-def train_fleet_size(fleet_size: int, phase: int = 1, gpu: bool = True, checkpoint_dir: str = "models"):
+def train_fleet_size(
+    fleet_size: int,
+    phase: int = 1,
+    gpu: bool = True,
+    checkpoint_dir: str = "models",
+    timesteps_override: int | None = None,
+    resume_from: str | None = None,
+    learning_rate_override: float | None = None,
+):
     """Train PPO agent for a specific fleet size"""
     
     curriculum = CurriculumCallback(phase)
@@ -148,6 +158,13 @@ def train_fleet_size(fleet_size: int, phase: int = 1, gpu: bool = True, checkpoi
         device = "cpu"
     
     print(f"  Device:            {device}")
+
+    total_timesteps = timesteps_override if timesteps_override is not None else cfg['timesteps']
+    if total_timesteps <= 0:
+        raise ValueError("timesteps_override must be positive")
+    learning_rate = learning_rate_override if learning_rate_override is not None else cfg['learning_rate']
+    if learning_rate <= 0:
+        raise ValueError("learning_rate_override must be positive")
     
     # Create checkpoint directory
     checkpoint_path = Path(checkpoint_dir) / f"fleet_{fleet_size}"
@@ -162,44 +179,57 @@ def train_fleet_size(fleet_size: int, phase: int = 1, gpu: bool = True, checkpoi
     print(f"\nInitializing PPO agent...")
     print(f"  Checkpoint path:   {checkpoint_path}")
     print(f"  Logs path:         {logs_path}")
-    
-    # Create PPO agent
-    model = PPO(
-        "MlpPolicy",
-        env,
-        learning_rate=cfg['learning_rate'],
-        n_steps=cfg['n_steps'],
-        batch_size=cfg['batch_size'],
-        n_epochs=cfg['n_epochs'],
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        verbose=1,
-        tensorboard_log=str(logs_path),
-        device=device,
-    )
-    
-    print(f"✓ PPO agent created with {sum(p.numel() for p in model.policy.parameters()):,} parameters")
+    print(f"  Learning rate:     {learning_rate:.2e}")
+
+    # Create PPO agent or resume from an existing checkpoint
+    if resume_from is not None:
+        resume_path = Path(resume_from)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+
+        print(f"  Resume checkpoint: {resume_path}")
+        model = PPO.load(str(resume_path), env=env, device=device)
+        model.tensorboard_log = str(logs_path)
+        model.learning_rate = learning_rate
+        model.lr_schedule = FloatSchedule(learning_rate)
+        print(f"✓ PPO agent loaded with {sum(p.numel() for p in model.policy.parameters()):,} parameters")
+    else:
+        model = PPO(
+            "MlpPolicy",
+            env,
+            learning_rate=learning_rate,
+            n_steps=cfg['n_steps'],
+            batch_size=cfg['batch_size'],
+            n_epochs=cfg['n_epochs'],
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.01,
+            verbose=1,
+            tensorboard_log=str(logs_path),
+            device=device,
+        )
+        print(f"✓ PPO agent created with {sum(p.numel() for p in model.policy.parameters()):,} parameters")
     
     # Create callbacks
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(1000, cfg['timesteps'] // 10),
+        save_freq=max(1000, total_timesteps // 10),
         save_path=str(checkpoint_path),
         name_prefix=f"ppo_fleet_{fleet_size}_phase_{phase}_checkpoint",
     )
     
     # Train the model
     print(f"\nStarting training...")
-    print(f"  Total timesteps: {cfg['timesteps']:,}")
-    print(f"  Expected time:   {cfg['timesteps'] / 50_000:.1f}x Phase 1 duration")
+    print(f"  Total timesteps: {total_timesteps:,}")
+    print(f"  Expected time:   {total_timesteps / 50_000:.1f}x Phase 1 duration")
     print(f"\nOpen TensorBoard with:")
     print(f"  tensorboard --logdir {logs_path.parent}")
     
     try:
         model.learn(
-            total_timesteps=cfg['timesteps'],
+            total_timesteps=total_timesteps,
             callback=checkpoint_callback,
+            reset_num_timesteps=resume_from is None,
             progress_bar=True,
         )
     except KeyboardInterrupt:
@@ -238,7 +268,10 @@ def evaluate_model(model: PPO, env: DroneFleetEnv, num_episodes: int = 3) -> flo
             steps += 1
         
         total_rewards.append(episode_reward)
-        print(f"  Episode {ep+1}: Reward={episode_reward:.2f}, Steps={steps}, Fulfillment={info.get('fulfillment_rate', 0):.1%}")
+        print(
+            f"  Episode {ep+1}: Reward={episode_reward:.2f}, "
+            f"Steps={steps}, Fulfillment={info.get('fulfillment_rate', 0):.1f}%"
+        )
     
     return np.mean(total_rewards)
 
@@ -253,6 +286,12 @@ def main():
     parser.add_argument("--no-gpu", action="store_true", help="Disable GPU training")
     parser.add_argument("--checkpoint-dir", type=str, default="models",
                        help="Directory to save model checkpoints")
+    parser.add_argument("--timesteps", type=int, default=None,
+                       help="Override the default training timesteps for the selected phase")
+    parser.add_argument("--resume-from", type=str, default=None,
+                       help="Path to an existing .zip checkpoint to continue training from")
+    parser.add_argument("--learning-rate", type=float, default=None,
+                       help="Override the default learning rate for new or resumed training")
     parser.add_argument("--test-only", action="store_true", help="Test environment without training")
     
     args = parser.parse_args()
@@ -284,6 +323,9 @@ def main():
                 phase=args.phase,
                 gpu=not args.no_gpu,
                 checkpoint_dir=args.checkpoint_dir,
+                timesteps_override=args.timesteps,
+                resume_from=args.resume_from,
+                learning_rate_override=args.learning_rate,
             )
             print(f"\n✅ Successfully trained fleet size {fleet_size}")
             print(f"   Model saved to: {model_path}.zip")

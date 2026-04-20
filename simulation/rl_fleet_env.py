@@ -94,6 +94,7 @@ class DroneState:
     battery_level: float  # 0.0-1.0
     in_flight: bool
     status: str  # 'idle', 'delivering', 'rebalancing', 'charging', 'craning'
+    busy_steps_remaining: int = 0
 
 
 @dataclass
@@ -126,16 +127,17 @@ class DemandGenerator:
     # Hub demand profiles (λ base, coefficient variation)
     # λ = base arrival rate per minute
     # cv² = coefficient of variation squared (service time variability)
+    # INCREASED 10x to fix demand generation issue
     HUB_PROFILES = {
-        'Hub 1': {'lambda_base': 0.15, 'cv_squared': 0.8},    # Office area
-        'Hub 2': {'lambda_base': 0.12, 'cv_squared': 0.9},    # Light area
-        'Hub 3': {'lambda_base': 0.18, 'cv_squared': 0.8},    # Residential
-        'Hub 5': {'lambda_base': 0.08, 'cv_squared': 1.0},    # Remote
-        'Hub 6': {'lambda_base': 0.14, 'cv_squared': 0.85},   # Mixed
-        'Hub 7': {'lambda_base': 0.10, 'cv_squared': 0.95},   # Light area
-        'Hub 9': {'lambda_base': 0.22, 'cv_squared': 0.8},    # Downtown (busiest)
-        'Hub 10': {'lambda_base': 0.11, 'cv_squared': 0.90},  # Suburban
-        'Hub 11': {'lambda_base': 0.16, 'cv_squared': 0.85},  # Tech hub
+        'Hub 1': {'lambda_base': 1.5, 'cv_squared': 0.8},    # Office area
+        'Hub 2': {'lambda_base': 1.2, 'cv_squared': 0.9},    # Light area
+        'Hub 3': {'lambda_base': 1.8, 'cv_squared': 0.8},    # Residential
+        'Hub 5': {'lambda_base': 0.8, 'cv_squared': 1.0},    # Remote
+        'Hub 6': {'lambda_base': 1.4, 'cv_squared': 0.85},   # Mixed
+        'Hub 7': {'lambda_base': 1.0, 'cv_squared': 0.95},   # Light area
+        'Hub 9': {'lambda_base': 2.2, 'cv_squared': 0.8},    # Downtown (busiest)
+        'Hub 10': {'lambda_base': 1.1, 'cv_squared': 0.90},  # Suburban
+        'Hub 11': {'lambda_base': 1.6, 'cv_squared': 0.85},  # Tech hub
     }
     
     # Meal time multipliers (how much demand increases during peaks)
@@ -266,6 +268,7 @@ class DroneFleetEnv(gym.Env):
         episode_length_hours: float = 24.0,
         sim_speedup: float = 10.0,
         demand_variability: str = 'meal_time_peaks',
+        active_hubs: Optional[List[str]] = None,
         seed: Optional[int] = None,
     ):
         """
@@ -274,22 +277,34 @@ class DroneFleetEnv(gym.Env):
         Args:
             fleet_size: Total number of drones (10, 20, 30, 40, or 50)
             episode_length_hours: Length of episode in simulation hours
-            sim_speedup: Speedup factor for simulation
+            sim_speedup: Simulation granularity expressed as
+                `steps_per_hour / 60`. A value of 60 means 1 minute per step.
             demand_variability: 'constant' or 'meal_time_peaks'
+            active_hubs: Optional subset of hubs active for this phase
             seed: Random seed
         """
-        
+        if sim_speedup <= 0:
+            raise ValueError("sim_speedup must be positive")
+
         self.fleet_size = fleet_size
         self.episode_length_hours = episode_length_hours
         self.sim_speedup = sim_speedup
         self.demand_variability = demand_variability
-        self.num_hubs = len(ACTIVE_HUBS)
+        self.hub_names = list(ACTIVE_HUBS)
+        self.num_hubs = len(self.hub_names)
+        self.active_hubs = list(active_hubs) if active_hubs is not None else list(self.hub_names)
+        invalid_hubs = sorted(set(self.active_hubs) - set(self.hub_names))
+        if invalid_hubs:
+            raise ValueError(f"Unknown active hubs: {invalid_hubs}")
+        self.active_hub_indices = [self.hub_names.index(hub) for hub in self.active_hubs]
         self.rng = np.random.RandomState(seed)
         
         # Time tracking
         self.current_hour = 0.0
         self.timestep = 0
-        self.max_timesteps = int(episode_length_hours * 60 / (1 / sim_speedup))  # 1 min per step
+        self.step_minutes = 60.0 / sim_speedup
+        self.max_timesteps = max(1, int(round((episode_length_hours * 60) / self.step_minutes)))
+        self.delivery_duration_steps = max(1, math.ceil(3.0 / self.step_minutes))
         
         # State tracking
         self.fleet_state: Optional[FleetState] = None
@@ -323,6 +338,7 @@ class DroneFleetEnv(gym.Env):
         self.episode_reward = 0.0
         self.episode_orders_fulfilled = 0
         self.episode_orders_total = 0
+        self.last_reward_components: Dict[str, float] = {}
         
     def reset(self, seed: Optional[int] = None, **kwargs) -> Tuple[np.ndarray, Dict]:
         """
@@ -340,19 +356,29 @@ class DroneFleetEnv(gym.Env):
         self.current_hour = 0.0  # Start at midnight
         self.timestep = 0
         
-        # Initialize fleet (all drones at hub 0 with full battery)
+        # Initialize fleet - distribute drones across hubs proportionally to demand
+        # For multi-hub environments, distribute based on hub demand profiles
+        idle_per_hub_list = self._distribute_drones_across_hubs()
+        
+        # Create drone list with distributed hub assignments
+        drones_list = []
+        drone_id = 0
+        for hub_id, count in enumerate(idle_per_hub_list):
+            for _ in range(int(count)):
+                drones_list.append(
+                    DroneState(
+                        hub_id=hub_id,
+                        battery_level=1.0,
+                        in_flight=False,
+                        status='idle',
+                    )
+                )
+                drone_id += 1
+        
         self.fleet_state = FleetState(
             fleet_size=self.fleet_size,
-            drones=[
-                DroneState(
-                    hub_id=0,  # Start all at Hub 1
-                    battery_level=1.0,
-                    in_flight=False,
-                    status='idle',
-                )
-                for _ in range(self.fleet_size)
-            ],
-            idle_per_hub=np.array([self.fleet_size] + [0] * (self.num_hubs - 1), dtype=np.float32),
+            drones=drones_list,
+            idle_per_hub=np.array(idle_per_hub_list, dtype=np.float32),
             queue_per_hub=np.zeros(self.num_hubs, dtype=np.float32),
             utilization_per_hub=np.zeros(self.num_hubs, dtype=np.float32),
             battery_per_hub=np.ones(self.num_hubs, dtype=np.float32),
@@ -365,16 +391,114 @@ class DroneFleetEnv(gym.Env):
         # Initialize order queues
         self.order_queues = np.zeros(self.num_hubs)
         self.queue_wait_time = np.zeros(self.num_hubs)
+        self.mgk_craning_prob = np.zeros(self.num_hubs)
+        self.mgk_utilisation = np.zeros(self.num_hubs)
         
         # Reset reward tracking
         self.episode_reward = 0.0
         self.episode_orders_fulfilled = 0
         self.episode_orders_total = 0
+        self.last_reward_components = {}
+
+        self._sync_fleet_state()
         
         obs = self._get_observation()
-        info = {"episode": 0, "timestep": 0}
+        info = {
+            "episode": 0,
+            "timestep": 0,
+            "active_hubs": self.active_hubs,
+            "step_minutes": self.step_minutes,
+        }
         
         return obs, info
+    
+    def _distribute_drones_across_hubs(self) -> np.ndarray:
+        """
+        Distribute drones across hubs based on demand profiles.
+        
+        For multi-hub environments, allocates drones proportionally to each hub's
+        demand profile (base lambda from DemandGenerator.HUB_PROFILES).
+        
+        Returns:
+            Array of drone counts per hub, sums to fleet_size
+        """
+        drone_allocation = np.zeros(self.num_hubs, dtype=int)
+
+        if not self.active_hub_indices:
+            return drone_allocation.astype(np.float32)
+
+        if len(self.active_hub_indices) == 1:
+            drone_allocation[self.active_hub_indices[0]] = self.fleet_size
+            return drone_allocation.astype(np.float32)
+
+        demand_weights = np.array([
+            DemandGenerator.HUB_PROFILES[self.hub_names[idx]]['lambda_base']
+            for idx in self.active_hub_indices
+        ])
+        demand_probs = demand_weights / demand_weights.sum()
+        active_allocation = (demand_probs * self.fleet_size).astype(int)
+        drone_allocation[self.active_hub_indices] = active_allocation
+
+        remaining = self.fleet_size - drone_allocation.sum()
+        if remaining > 0:
+            highest_demand_local_idx = int(np.argmax(demand_weights))
+            highest_demand_hub = self.active_hub_indices[highest_demand_local_idx]
+            drone_allocation[highest_demand_hub] += remaining
+        
+        return drone_allocation.astype(np.float32)
+
+    def _reset_step_counters(self) -> None:
+        """Reset per-step metrics so rewards are not cumulative artifacts."""
+        self.fleet_state.orders_fulfilled_this_step = 0
+        self.fleet_state.drones_craning = 0
+        self.fleet_state.drones_deadheading = 0
+
+    def _sync_fleet_state(self) -> None:
+        """Synchronize aggregate hub metrics from individual drone states."""
+        idle_per_hub = np.zeros(self.num_hubs, dtype=np.float32)
+        busy_per_hub = np.zeros(self.num_hubs, dtype=np.float32)
+        drones_per_hub = np.zeros(self.num_hubs, dtype=np.float32)
+        battery_sum_per_hub = np.zeros(self.num_hubs, dtype=np.float32)
+
+        for drone in self.fleet_state.drones:
+            hub_id = drone.hub_id
+            drones_per_hub[hub_id] += 1
+            battery_sum_per_hub[hub_id] += drone.battery_level
+            if drone.status == 'idle':
+                idle_per_hub[hub_id] += 1
+            else:
+                busy_per_hub[hub_id] += 1
+
+        utilization = np.zeros(self.num_hubs, dtype=np.float32)
+        battery_per_hub = np.zeros(self.num_hubs, dtype=np.float32)
+        active_mask = drones_per_hub > 0
+        utilization[active_mask] = busy_per_hub[active_mask] / drones_per_hub[active_mask]
+        battery_per_hub[active_mask] = battery_sum_per_hub[active_mask] / drones_per_hub[active_mask]
+
+        self.fleet_state.idle_per_hub = idle_per_hub
+        self.fleet_state.queue_per_hub = self.order_queues.astype(np.float32)
+        self.fleet_state.utilization_per_hub = utilization
+        self.fleet_state.battery_per_hub = battery_per_hub
+        self.fleet_state.orders_unfulfilled_queued = int(np.sum(self.order_queues))
+
+    def _idle_drones_at_hub(self, hub_id: int, min_battery: float = 0.0) -> List[DroneState]:
+        """Return idle drones at a hub that satisfy a minimum battery threshold."""
+        return [
+            drone
+            for drone in self.fleet_state.drones
+            if drone.hub_id == hub_id
+            and drone.status == 'idle'
+            and drone.battery_level >= min_battery
+        ]
+
+    def _get_next_active_hub(self, hub_id: int) -> int:
+        """Choose the next active hub cyclically for simplified rebalancing."""
+        if hub_id not in self.active_hub_indices or len(self.active_hub_indices) <= 1:
+            return hub_id
+
+        current_position = self.active_hub_indices.index(hub_id)
+        next_position = (current_position + 1) % len(self.active_hub_indices)
+        return self.active_hub_indices[next_position]
     
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """
@@ -391,24 +515,28 @@ class DroneFleetEnv(gym.Env):
             info: Additional info
         """
         
-        # 1. Process action (rebalance drones)
+        self._reset_step_counters()
+
+        # 1. Update drone states from the previous step
+        self._update_fleet_states()
+
+        # 2. Process action (rebalance drones)
         self._execute_rebalancing_action(action)
         
-        # 2. Simulate demand generation
+        # 3. Simulate demand generation
         self._generate_orders()
         
-        # 3. Fulfill orders (greedy: use available idle drones)
+        # 4. Fulfill orders using hub-local idle drones
         self._fulfill_orders()
-        
-        # 4. Update drone states (battery drain, charging, etc)
-        self._update_fleet_states()
+
+        self._sync_fleet_state()
         
         # 5. Calculate reward
         reward = self._compute_reward()
         
         # 6. Update time
         self.timestep += 1
-        self.current_hour += (1.0 / 60.0) * (1.0 / self.sim_speedup)  # 1 minute sim time
+        self.current_hour += self.step_minutes / 60.0
         if self.current_hour >= 24:
             self.current_hour = 0.0  # Wrap around day
         
@@ -426,6 +554,9 @@ class DroneFleetEnv(gym.Env):
             "orders_fulfilled": self.episode_orders_fulfilled,
             "orders_total": self.episode_orders_total,
             "fulfillment_rate": self.get_fulfillment_rate(),
+            "active_hubs": self.active_hubs,
+            "step_minutes": self.step_minutes,
+            "reward_components": dict(self.last_reward_components),
         }
         
         # Track episode reward
@@ -460,28 +591,25 @@ class DroneFleetEnv(gym.Env):
         # Execute transfers: hub i → hub (i+1) if action[i] > 0
         # This is simplified; in production, you'd model actual flights
         
-        for i in range(self.num_hubs):
+        for i in self.active_hub_indices:
             drones_to_send = int(max(0, action_clipped[i]))
             
-            if drones_to_send > 0 and self.fleet_state.idle_per_hub[i] >= drones_to_send:
-                # Check battery constraint
-                hub_drones = [d for d in self.fleet_state.drones if d.hub_id == i]
-                idle_drones = [d for d in hub_drones if d.status == 'idle']
-                eligible_drones = [d for d in idle_drones if d.battery_level >= 0.15]
-                
-                if len(eligible_drones) >= drones_to_send:
-                    # Find destination (simple: next hub cyclically)
-                    dest_hub = (i + 1) % self.num_hubs
-                    
-                    # Move drones
-                    for drone in eligible_drones[:drones_to_send]:
-                        drone.hub_id = dest_hub
-                        drone.status = 'rebalancing'
-                        self.fleet_state.drones_deadheading += 1
-                    
-                    # Update fleet state
-                    self.fleet_state.idle_per_hub[i] -= drones_to_send
-                    self.fleet_state.idle_per_hub[dest_hub] += drones_to_send
+            if drones_to_send <= 0:
+                continue
+
+            min_battery = DEADHEAD_BATTERY_REQUIRED[self.hub_names[i]]
+            eligible_drones = self._idle_drones_at_hub(i, min_battery=min_battery)
+            if len(eligible_drones) < drones_to_send:
+                continue
+
+            dest_hub = self._get_next_active_hub(i)
+            if dest_hub == i:
+                continue
+
+            for drone in eligible_drones[:drones_to_send]:
+                drone.hub_id = dest_hub
+                drone.battery_level = max(0.0, drone.battery_level - min_battery)
+                self.fleet_state.drones_deadheading += 1
     
     def _generate_orders(self) -> None:
         """
@@ -493,7 +621,11 @@ class DroneFleetEnv(gym.Env):
         
         # Generate orders for each hub based on MGk model
         for i in range(self.num_hubs):
-            hub_name = ACTIVE_HUBS[i]
+            hub_name = self.hub_names[i]
+            if hub_name not in self.active_hubs:
+                self.mgk_craning_prob[i] = 0.0
+                self.mgk_utilisation[i] = 0.0
+                continue
             
             # Get MGk demand profile for this hub at current time
             hub_demand = DemandGenerator.generate_hub_demand(
@@ -504,7 +636,7 @@ class DroneFleetEnv(gym.Env):
             
             # Generate Poisson arrivals based on lambda from MGk model
             if hub_demand and 'lambda' in hub_demand:
-                lambda_param = hub_demand['lambda']
+                lambda_param = hub_demand['lambda'] * self.step_minutes
                 new_orders = self.rng.poisson(lambda_param)
                 
                 # Track MGk craning probability (for reward signal)
@@ -514,30 +646,33 @@ class DroneFleetEnv(gym.Env):
                 
                 self.order_queues[i] += new_orders
                 self.episode_orders_total += new_orders
-                self.queue_wait_time[i] += new_orders
+                self.queue_wait_time[i] += new_orders * self.step_minutes
 
     
     def _fulfill_orders(self) -> None:
         """
         Fulfill pending orders using available idle drones.
-        Greedy: use nearest/fastest available drones.
+        Uses a pool of available drones across all hubs for flexibility.
         """
         
-        for i in range(self.num_hubs):
-            # How many drones available to fulfill orders?
-            available_drones = int(self.fleet_state.idle_per_hub[i])
-            orders_to_fulfill = min(available_drones, int(self.order_queues[i]))
-            
-            if orders_to_fulfill > 0:
-                self.order_queues[i] -= orders_to_fulfill
-                self.fleet_state.orders_fulfilled_this_step += orders_to_fulfill
-                self.episode_orders_fulfilled += orders_to_fulfill
-                
-                # Update utilization
-                self.fleet_state.utilization_per_hub[i] += orders_to_fulfill / self.fleet_size
-        
-        # Orders that cannot be fulfilled (stockout)
-        self.fleet_state.orders_unfulfilled_queued = int(np.sum(self.order_queues))
+        for hub_idx in self.active_hub_indices:
+            pending_orders = int(self.order_queues[hub_idx])
+            if pending_orders <= 0:
+                continue
+
+            idle_drones = self._idle_drones_at_hub(hub_idx)
+            orders_to_fulfill = min(len(idle_drones), pending_orders)
+            if orders_to_fulfill <= 0:
+                continue
+
+            for drone in idle_drones[:orders_to_fulfill]:
+                drone.in_flight = True
+                drone.status = 'delivering'
+                drone.busy_steps_remaining = self.delivery_duration_steps
+
+            self.order_queues[hub_idx] -= orders_to_fulfill
+            self.fleet_state.orders_fulfilled_this_step += orders_to_fulfill
+            self.episode_orders_fulfilled += orders_to_fulfill
     
     def _update_fleet_states(self) -> None:
         """
@@ -545,21 +680,15 @@ class DroneFleetEnv(gym.Env):
         Simplified: assume deliveries take 5 minutes, drones return to hub.
         """
         
-        # Drain battery for drones in flight (simplified)
         for drone in self.fleet_state.drones:
             if drone.in_flight:
-                drone.battery_level -= 0.01 * (1.0 / self.sim_speedup)  # 1% per minute
-                if drone.battery_level < 0:
-                    drone.battery_level = 0
+                drone.busy_steps_remaining = max(0, drone.busy_steps_remaining - 1)
+                drone.battery_level = max(0.0, drone.battery_level - 0.01 * self.step_minutes)
+                if drone.busy_steps_remaining == 0:
+                    drone.in_flight = False
+                    drone.status = 'idle'
             elif drone.status == 'idle' and drone.battery_level < 1.0:
-                # Charge idle drones
-                drone.battery_level = min(1.0, drone.battery_level + 0.05)
-        
-        # Update per-hub battery average
-        for i in range(self.num_hubs):
-            hub_drones = [d for d in self.fleet_state.drones if d.hub_id == i]
-            if hub_drones:
-                self.fleet_state.battery_per_hub[i] = np.mean([d.battery_level for d in hub_drones])
+                drone.battery_level = min(1.0, drone.battery_level + 0.02 * self.step_minutes)
     
     def _get_observation(self) -> np.ndarray:
         """
@@ -612,31 +741,42 @@ class DroneFleetEnv(gym.Env):
         FIX: Scale final reward by 1000 to keep in reasonable range [-1000, +1000]
         """
         
-        reward = 0.0
-        
-        # 1. Fulfillment bonus (orders actually removed from queue)
-        reward += 50 * self.fleet_state.orders_fulfilled_this_step
-        
-        # 2. Queue penalty (discourage backlog accumulation)
+        fulfillment_bonus_raw = 50 * self.fleet_state.orders_fulfilled_this_step
+
         # FIXED: Changed from wait_time to queue_length (more direct signal)
         total_queue_length = int(np.sum(self.order_queues))
-        reward -= 10 * total_queue_length
-        
-        # 3. Craning penalty (critical - avoid circling)
-        reward -= 200 * self.fleet_state.drones_craning
-        
-        # 4. Dead-head cost (expensive repositioning)
-        reward -= 5 * self.fleet_state.drones_deadheading
-        
-        # 5. Idle bonus (reward for spare capacity)
-        total_idle = np.sum(self.fleet_state.idle_per_hub)
+        queue_penalty_raw = -10 * total_queue_length
+
+        craning_penalty_raw = -200 * self.fleet_state.drones_craning
+        deadhead_penalty_raw = -5 * self.fleet_state.drones_deadheading
+
+        total_idle = float(np.sum(self.fleet_state.idle_per_hub))
+        idle_bonus_raw = 0.0
         if total_idle > 5:
-            reward += 10 * (total_idle - 5) / self.fleet_size
-        
-        # CRITICAL FIX: Scale reward to reasonable range [-1000, +1000]
-        # Without this, reward can become billions due to queue accumulation
-        reward = reward / 100.0
-        
+            idle_bonus_raw = 10 * (total_idle - 5) / self.fleet_size
+
+        raw_total = (
+            fulfillment_bonus_raw
+            + queue_penalty_raw
+            + craning_penalty_raw
+            + deadhead_penalty_raw
+            + idle_bonus_raw
+        )
+
+        reward = raw_total / 100.0
+        self.last_reward_components = {
+            "fulfillment_bonus": fulfillment_bonus_raw / 100.0,
+            "queue_penalty": queue_penalty_raw / 100.0,
+            "craning_penalty": craning_penalty_raw / 100.0,
+            "deadhead_penalty": deadhead_penalty_raw / 100.0,
+            "idle_bonus": idle_bonus_raw / 100.0,
+            "total": reward,
+            "queue_length": float(total_queue_length),
+            "orders_fulfilled_this_step": float(self.fleet_state.orders_fulfilled_this_step),
+            "deadheading_drones_this_step": float(self.fleet_state.drones_deadheading),
+            "idle_drones": total_idle,
+        }
+
         return reward
     
     def get_fulfillment_rate(self) -> float:
