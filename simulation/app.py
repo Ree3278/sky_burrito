@@ -291,9 +291,15 @@ def load_network(demand_scale: float = 1.0, use_auto_swap: bool = False):
     Re-runs if demand_scale or use_auto_swap changes.
     """
     shortlist = prune_corridors()
+    top_routes = shortlist[:10]
     spec = automated_service_spec() if use_auto_swap else default_service_spec()
-    sizing = size_hubs(shortlist, service_spec=spec)
-    return shortlist, sizing
+    sizing = size_hubs(top_routes, service_spec=spec)
+    active_hub_ids = sorted(
+        {route.corridor.origin.id for route in top_routes}
+        | {route.corridor.destination.id for route in top_routes}
+    )
+    hubs_lookup = {hub_id: HUB_LOOKUP[hub_id] for hub_id in active_hub_ids}
+    return top_routes, sizing, hubs_lookup, active_hub_ids
 
 
 # ── Sidebar controls ──────────────────────────────────────────────────────────
@@ -349,8 +355,7 @@ if "snapshot" not in st.session_state:
     st.session_state.snapshot = None
 
 # ── Button logic ─────────────────────────────────────────────────────────────
-shortlist, sizing = load_network(demand_scale, use_auto_swap)
-top_routes = shortlist[:10]
+top_routes, sizing, active_hubs_lookup, active_hub_ids = load_network(demand_scale, use_auto_swap)
 
 if pad_override > 0:
     for r in sizing:
@@ -374,7 +379,7 @@ def _selected_route():
 if btn_reset or (btn_start and st.session_state.registry is None):
     clock = SimClock(time_multiplier=time_mult)
     dispatcher = Dispatcher(
-        shortlist=shortlist,
+        shortlist=top_routes,
         lambda_per_sim_s=(200 * demand_scale) / 3600,
     )
     registry = DroneRegistry(
@@ -420,9 +425,9 @@ story_placeholder   = st.empty()
 
 # ── Initial / static map (shown before simulation starts) ────────────────────
 def _initial_view() -> pdk.Deck:
-    arc_layer   = corridor_arc_layer(shortlist, st.session_state.selected_route_label)
-    hub_layer   = hub_scatter_layer(sizing, {}, HUB_LOOKUP)
-    label_layer = hub_label_layer(sizing, HUB_LOOKUP)
+    arc_layer   = corridor_arc_layer(top_routes, st.session_state.selected_route_label)
+    hub_layer   = hub_scatter_layer(sizing, {}, active_hubs_lookup)
+    label_layer = hub_label_layer(sizing, active_hubs_lookup)
     return pdk.Deck(
         layers=[arc_layer, hub_layer, label_layer],
         initial_view_state=pdk.ViewState(
@@ -443,10 +448,10 @@ def _initial_view() -> pdk.Deck:
 
 
 def _live_view(snapshot) -> pdk.Deck:
-    arc_layer    = corridor_arc_layer(shortlist, st.session_state.selected_route_label)
-    hub_s_layer  = hub_scatter_layer(sizing, snapshot.hub_metrics, HUB_LOOKUP)
-    label_layer  = hub_label_layer(sizing, HUB_LOOKUP)
-    halo_layer   = saturated_hub_ring_layer(sizing, snapshot.hub_metrics, HUB_LOOKUP)
+    arc_layer    = corridor_arc_layer(top_routes, st.session_state.selected_route_label)
+    hub_s_layer  = hub_scatter_layer(sizing, snapshot.hub_metrics, active_hubs_lookup)
+    label_layer  = hub_label_layer(sizing, active_hubs_lookup)
+    halo_layer   = saturated_hub_ring_layer(sizing, snapshot.hub_metrics, active_hubs_lookup)
     d_layer      = drone_layer(snapshot)
     cran_layer   = craning_ring_layer(snapshot)
     return pdk.Deck(
@@ -561,6 +566,7 @@ def _render_metrics(snapshot) -> None:
 
         st.divider()
         st.markdown("**Supporting Top 10 corridor list**")
+        st.caption(f"Demo network is limited to {len(top_routes)} top-ranked corridors across {len(active_hub_ids)} active hubs.")
         route_options = {route.corridor.label: route for route in top_routes}
 
         if route_options:
