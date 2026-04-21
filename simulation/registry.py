@@ -252,7 +252,7 @@ class DroneRegistry:
         """
         dest_hub_id = request.destination_hub_id
         best_corridor = None
-        best_km = float("inf")
+        best_km = float("inf")  # straight_line_m of best candidate so far
 
         for sc in self._dispatcher.shortlist:
             corr = sc.corridor
@@ -260,9 +260,9 @@ class DroneRegistry:
                 corr.destination.id == dest_hub_id
                 and corr.origin.id != request.origin_hub_id
                 and self._fleet.has_idle_drone(corr.origin.id)
-                and corr.distance_km < best_km
+                and corr.straight_line_m < best_km
             ):
-                best_km = corr.distance_km
+                best_km = corr.straight_line_m
                 best_corridor = corr
 
         if best_corridor is None:
