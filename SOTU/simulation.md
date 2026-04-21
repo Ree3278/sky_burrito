@@ -1,34 +1,36 @@
 # State of the Union — Simulation
-**Date:** April 13, 2026
-**Module:** `simulation/`
-**Depends on:** `corridor_pruning/` shortlist · `hub_sizing/` M/G/k sizing results
+**Date:** April 21, 2026  
+**Module:** `simulation/`  
+**Depends on:** `corridor_pruning/` shortlist · `hub_sizing/` M/G/k sizing results · `models/` PPO weights
 
 ---
 
 ## What This Stage Does
 
-Converts the static analysis — 20 pruned corridors, 10 sized hubs — into a
-**live digital twin** of the Friday night peak window (18:00–21:00). Drones
-are spawned by a Poisson dispatcher, fly through a five-state machine, occupy
-landing pads, and surface craning events in real time on a Pydeck map hosted
-by Streamlit.
+Converts the static analysis — 20 pruned corridors, 9 active hubs — into a
+**live digital twin** of the Friday night peak window (18:00–21:00). The simulation
+runs on two layers:
 
-The goal is to move from a defensible spreadsheet to a convincing visual
-business case: watch Hub 1 go red at 18:14 because all 8 pads are full.
+1. **Physics layer** — Drones fly through a six-state machine, occupy landing pads, queue when the fleet is exhausted, and trigger craning events when destination pads are full.
+2. **Intelligence layer** — A trained PPO agent observes fleet distribution and demand signals and issues rebalancing commands to prevent tidal flow imbalance from collapsing throughput on exporter hubs like Hub 3.
 
 ---
 
-## Files Built
+## Files
 
 | File | Role |
 |---|---|
 | `config.py` | All tunable constants — time multiplier, colors, physics, fleet params |
 | `clock.py` | `SimClock`: wall-clock → sim-time with configurable multiplier |
-| `drone.py` | `Drone` agent + `DroneState` enum — five-state machine with Shapely position interpolation |
-| `dispatcher.py` | Poisson order generator — samples corridors by demand weight, spawns `Drone` objects |
-| `registry.py` | Central loop — advances all drones, tracks pad occupancy, detects craning, emits `SimSnapshot` |
-| `layers.py` | Pydeck layer builders — arc corridors, hub scatter, drone dots, craning rings |
-| `app.py` | Streamlit frontend — map + live metrics, sidebar controls |
+| `drone.py` | `Drone` agent + `DroneState` enum — six-state machine with Shapely position interpolation |
+| `fleet.py` | `FleetPool` — finite fleet budget, per-hub checkout/checkin, order queue, dead-head reservation |
+| `dispatcher.py` | Poisson order generator — emits `DispatchRequest` frozen dataclasses, carries over fractional arrivals |
+| `registry.py` | Central loop — advances all drones, integrates FleetPool, drains queued orders after checkin, emits `SimSnapshot` |
+| `rl_fleet_env.py` | Gymnasium `DroneFleetEnv` — 42D obs space, 9D action space, multi-objective reward shaping |
+| `rl_training.py` | PPO training entry point — 4-phase curriculum, TensorBoard logging, checkpoint saving |
+| `rl_inference.py` | Load trained weights, run evaluation episodes, report reward breakdown |
+| `layers.py` | Pydeck layer builders — arc corridors, hub scatter, drone dots, craning rings, saturation overlays |
+| `app.py` | Streamlit frontend — live map, sidebar controls, metrics, featured route card |
 
 **Launch command:**
 ```bash
@@ -39,169 +41,190 @@ uv run streamlit run simulation/app.py
 
 ## What's Working
 
-### Drone state machine
-Five states are fully implemented and transition correctly:
+### Drone state machine (6 states)
 
 ```
-TAKEOFF → CRUISE → LANDING → COOLDOWN → (deleted)
-                      ↓ (pad full)
-                   CRANING → COOLDOWN (when pad opens)
+IDLE → TAKEOFF → CRUISE → LANDING → COOLDOWN → IDLE
+                               ↓ (pad full)
+                            CRANING → (pad opens) → COOLDOWN
 ```
 
-Position interpolates linearly along the corridor `LineString` during CRUISE.
-Altitude is tracked independently (climb / cruise / descent phases).
+COOLDOWN_S = 330 s (manual kiosk spec). Position interpolates linearly along
+the corridor LineString during CRUISE. Altitude tracked independently across
+climb/cruise/descent phases.
+
+### Finite fleet — `FleetPool`
+
+The infinite-drone limitation is **resolved**. Every drone is now a physical
+unit with a lifecycle:
+
+```
+Order arrives at Hub H
+  ├─ idle drone available at H?  YES → checkout, dispatch
+  └─ no drone available?         NO  → enqueue order, wait
+
+Drone completes COOLDOWN at Hub H'
+  ├─ checkin to H' idle pool
+  └─ pending order queued at H'?  YES → re-dispatch immediately
+```
+
+Fleet is initialised via `FleetPool.from_hub_sizing()` — largest-remainder
+allocation proportional to hub `match_score`. Default fleet: 30 drones.
+Supported fleet sizes for the trained RL policy: **10, 20, 30, 40, 50 drones**.
 
 ### Dispatcher
-Poisson sampling from a weighted corridor list. Each tick generates `Poisson(λ × dt)` orders, each assigned to a corridor proportional to `demand_weight`. Fractional arrivals carry over between ticks for numerical accuracy.
 
-### Registry
-Pad occupancy is recounted from live drone states every tick — no counters to
-drift out of sync. Craning events are detected on the transition into the
-`CRANING` state and logged to a running total.
+`DispatchRequest` frozen dataclasses (not Drone objects) are emitted per order.
+Poisson sampling from the weighted corridor list, with fractional leftover
+carry-over between ticks for numerical accuracy.
 
 ### Streamlit app
-- **Pydeck dark map** centered on Mission–Noe with pitch=45° tilt
-- **ArcLayer** — 20 shortlisted corridors (static, always visible)
-- **ScatterplotLayer** — hubs, sized by k-pads, colored by tier (red=heavy, amber=moderate, green=light), turns solid red when saturated
-- **ScatterplotLayer** — live drone dots, color-coded by state
-- **ScatterplotLayer** — pulsing red ring on every craning drone
-- **Sidebar controls** — time multiplier (1×–120×), demand scale (0.5×–3×), automated swap toggle, pad count override, Start/Pause/Reset
-- **Live metrics row** — sim time, active drones, craning count, orders dispatched
-- **Per-hub utilisation bar** — pads_in_use / k_pads with craning count
 
-### Smoke test result (15 sim-minutes)
+- Pydeck map with `MAP_BEARING=-8°`, `MAP_PITCH=38°`, light basemap
+- **ArcLayer** — 20 shortlisted corridors, arc width ∝ demand weight, great-circle interpolation, highlighted featured route
+- **ScatterplotLayer** — hubs sized by k-pads, colored by tier, turns solid red when saturated
+- **ScatterplotLayer** — live drone dots color-coded by state
+- **ScatterplotLayer** — pulsing red ring on craning drones and saturated hub rings
+- Sidebar controls — time multiplier (1×–120×), demand scale, automated swap toggle, Start/Pause/Reset
+- Live metrics — sim time, active drones, craning count, orders dispatched, queue depth
+- Per-hub utilisation bars with craning count and tier badge
+- Featured route card (dark) with cost arbitrage and CO₂ savings
+- CSS-styled sim-hero banner, sim-chip badges, sim-status-cards
+
+---
+
+## Tidal Flow — The Problem That Was Solved
+
+Summing appearances across the top-20 corridors:
+
+| Hub | As origin | As destination | Net flow |
+|---|---|---|---|
+| Hub 3  | 1 | 0 | −1 (pure exporter) |
+| Hub 11 | 4 | 3 | −1 (exporter) |
+| Hub 9  | 3 | 2 | −1 (exporter) |
+| Hub 1  | 3 | 3 | 0 (balanced) |
+| Hub 6  | 1 | 5 | **+4 (importer / drone sink)** |
+
+Without rebalancing, Hub 3 runs dry while Hub 6 accumulates idle drones. The
+finite fleet makes this tidal drift immediately visible — Hub 3 order queue grows,
+Hub 6 idles. The RL policy's job is to issue dead-head commands before the
+exporter hubs go dark.
+
+---
+
+## RL Policy — PPO Fleet Optimization
+
+### Gymnasium Environment (`rl_fleet_env.py`)
+
+**Observation space (42D):**
+- 9 values: idle drones per hub (normalised)
+- 9 values: queued orders per hub (normalised)
+- 9 values: drones en-route to each hub (normalised)
+- 9 values: demand rate per hub at current sim hour
+- 6 values: global signals (time-of-day, fleet utilisation, fulfillment rate, craning rate, queue ratio, deadhead ratio)
+
+**Action space (9D continuous):** One scalar per active hub. Positive value on hub H = move drones *to* H (rebalance). Negative = hold or source from H. Magnitude controls aggressiveness.
+
+**Reward shaping (per step):**
+| Signal | Value |
+|---|---|
+| Fulfilled order | +50 |
+| Queued order (penalty) | −10 |
+| Craning event (penalty) | −200 |
+| Dead-head flight (overhead) | −5 |
+| Idle drone at correct hub | +10 |
+
+**Demand generator** — M/G/k Gaussian demand peaks at meal-times:
+- Breakfast (07:00–09:00)
+- Lunch (11:30–13:30)
+- Snack (15:00–17:00)
+- Dinner (18:00–20:00)
+
+### Curriculum Learning (`rl_training.py`)
+
+Four phases of increasing complexity:
+
+| Phase | Scope | Episode | Timesteps | LR |
+|---|---|---|---|---|
+| 1 | Single hub (Hub 6) | 6 h | 50k | 1e-3 |
+| 2 | Two hubs bidirectional (Hub 11 ↔ Hub 9) | 12 h | 100k | 5e-4 |
+| 3 | Full network (9 hubs, 20 routes) | 24 h | 500k | 3e-4 |
+| 4 | Full network + meal-time peaks | 24 h | 1M | 2e-4 |
+
+**Architecture:** PPO + MlpPolicy, γ=0.99, GAE λ=0.95, clip=0.2, ent_coef=0.01, n_epochs=20.
+Device auto-detection: CUDA → MPS → CPU.
+
+### Trained Weights — Current State (`models/`)
+
+Training has been run through **Phase 3** across 5 fleet sizes:
+
+| Fleet size | Phases trained | Checkpoints | Final model |
+|---|---|---|---|
+| 10 drones | Phase 3 only | 50k–500k (10 checkpoints) | `fleet_10/ppo_fleet_10_phase_3.zip` |
+| 20 drones | Phase 1 → 2 → 3 (full curriculum) | Phase 1: 5k–50k · Phase 2: 10k–100k · Phase 3: 50k–500k | `fleet_20/ppo_fleet_20_phase_3.zip` |
+| 30 drones | Phase 3 only | 50k–500k | `fleet_30/ppo_fleet_30_phase_3.zip` |
+| 40 drones | Phase 3 only | 50k–500k | `fleet_40/ppo_fleet_40_phase_3.zip` |
+| 50 drones | Phase 3 only | 50k–500k | `fleet_50/ppo_fleet_50_phase_3.zip` |
+
+Fleet 20 is the **reference model** — the only fleet size that ran the full
+3-phase curriculum. Fleets 10/30/40/50 were trained at phase 3 directly and
+can be compared to the fleet-20 baseline to study the effect of fleet size on
+agent performance.
+
+Phase 4 (full network + meal-time demand peaks, 1M steps) has **not yet been run**
+for any fleet size. The `rl_training.py` scaffold is ready.
+
+### Inference (`rl_inference.py`)
+
+```bash
+python simulation/rl_inference.py --fleet-size 20 --phase 3
+```
+
+Reports: `avg_reward`, `avg_fulfillment`, `std_reward`, and per-component reward
+breakdown across N evaluation episodes.
+
+---
+
+## Smoke Test Results (Original Phase — now superseded)
+
+Before the finite fleet and RL were added, the original smoke test showed:
+
 ```
 Sim time:          18:14
 Active drones:     38
 Orders dispatched: 59
-Craning events:    1           ← Hub 1 hit 9 drones against 8 pads at 18:09
+Craning events:    1  ← Hub 1 hit 9/8 pads at 18:09
 ```
 
-Hub utilisation after 15 sim-min (manual kiosk spec, demand=200/hr):
-```
-Hub  1  [█████████░]  9/8   ← already saturated once
-Hub 11  [█████░░░  ]  5/8
-Hub  6  [████░░    ]  4/6
-Hub  7  [███░░░    ]  3/6
-Hub  2  [█░░░░░░   ]  1/7
-Hub  9  [█░░░░     ]  1/5
-```
-
-The pad contention model is behaving correctly. Hub 1 is the first to crack,
-exactly as the M/G/k model predicted it would be the most load-bearing node.
+This result validated the craning model. The infinite-drone architecture has
+since been replaced — the smoke test figures are not directly comparable to the
+current simulation which respects fleet budget and queues orders.
 
 ---
 
-## Key Limitation — Infinite Drone Fleet
+## Open Items
 
-**This is the most significant gap in the current simulation.**
-
-Every order spawns a brand-new `Drone` object from nothing. After COOLDOWN
-completes, the drone is deleted from the registry and never seen again.
-There is no fleet budget, no recycling, no repositioning.
-
-### What this breaks
-
-The **pad occupancy model is correct** — pads fill, craning fires, the
-utilisation numbers are meaningful. But the **supply side is unconstrained**.
-In reality you have a fixed fleet of physical drones (e.g., 30 units) distributed
-across 10 hubs. Once all are in the air or on pads, new orders queue at
-the *origin hub* — not just at the destination pad. This queuing pressure
-doesn't exist in the current model.
-
-### The tidal flow consequence
-
-The shortlist is directional. Summing appearances across the top-20 corridors:
-
-| Hub | As origin | As destination | Net flow |
-|---|---|---|---|
-| Hub 11 | 4 | 3 | −1 (exporter) |
-| Hub 1 | 3 | 3 | 0 (balanced) |
-| Hub 6 | 1 | 5 | **+4 (importer)** |
-| Hub 9 | 3 | 2 | −1 (exporter) |
-| Hub 3 | 1 | 0 | −1 (pure exporter) |
-
-Hub 6 is a drone sink — it receives far more flights than it dispatches.
-Hub 3 is a pure exporter. Run the simulation long enough and Hub 3 runs dry
-while Hub 6 overflows with idle drones. The project brief calls this "Tidal
-Flow" and flags it as a Phase 2 concern. With infinite drones it never
-surfaces.
-
----
-
-## What's Planned Next — Tidal Flow + Fleet Budget
-
-Two interlocking additions are designed and ready to implement:
-
-### 1. Fleet budget + drone recycling
-
-Replace the spawn-and-delete lifecycle with a physical fleet:
-
-```
-Order arrives at Hub H
-  └─ idle drone available at H?
-       YES → checkout drone, dispatch on corridor
-       NO  → enqueue order, wait
-       
-Drone completes COOLDOWN at Hub H'
-  └─ checkin drone to H' idle pool
-  └─ pending order in H' queue?
-       YES → immediately re-dispatch
-       NO  → drone sits idle at H'
-```
-
-New file: **`simulation/fleet.py`** — `FleetPool` managing a per-hub integer
-count of idle drones. Total across all hubs = `FLEET_SIZE` (constant, e.g. 30).
-Initial distribution: proportional to hub `match_score`.
-
-### 2. Dead-head rebalancing — `TidalFlowPolicy` (SPU)
-
-A pluggable **Strategic Policy Unit** triggered when tidal imbalance crosses
-a threshold. The default policy is threshold-based greedy nearest-surplus:
-
-```
-Every REBALANCE_INTERVAL_S sim-seconds:
-  For each hub H where idle_count < LOW_WATER_MARK:
-    Find hub H' = nearest hub where idle_count > HIGH_WATER_MARK
-    Dispatch a DEAD_HEAD drone: H' → H
-    (no payload, shorter cooldown — battery swap only, ~180s)
-```
-
-New file: **`simulation/rebalancing.py`** — abstract `RebalancingPolicy` base
-class + `TidalFlowPolicy` implementation + `NoRebalancing` null policy for
-A/B comparison.
-
-The `DEAD_HEAD` state slots cleanly into the existing state machine:
-```
-DEAD_HEAD_TAKEOFF → DEAD_HEAD_CRUISE → DEAD_HEAD_LANDING → COOLDOWN(180s) → IDLE
-```
-
-Drones in DEAD_HEAD are rendered as dim grey dots on the map — visible but
-clearly distinguished from payload flights. Their total count and cost
-(distance flown × energy) is tracked as the `1.X` overhead multiplier.
-
-### The "mic-drop" experiment this enables
-
-With fleet budget + tidal flow implemented:
-
-1. Set `FLEET_SIZE = 20`, `pad_override = 2` (under-built hubs)
-2. Turn off rebalancing (`NoRebalancing` policy)
-3. Watch Hub 3 go dark (no drones to dispatch) while Hub 6 queues up idle drones
-4. Turn on `TidalFlowPolicy`
-5. Watch dead-head grey dots redistribute the fleet and Hub 3 come back online
-
-That sequence — broken network → rebalancing kicks in → recovery — is the
-business case for the operational overhead budget.
-
----
-
-## Immediate Next Steps
-
-| Priority | Task | File |
+| Priority | Task | Notes |
 |---|---|---|
-| **1** | `FleetPool` class + initial distribution | `simulation/fleet.py` (new) |
-| **2** | Drone lifecycle: checkin/checkout + order queue | `simulation/drone.py`, `simulation/dispatcher.py` |
-| **3** | `DEAD_HEAD` state in drone state machine | `simulation/drone.py` |
-| **4** | `TidalFlowPolicy` SPU | `simulation/rebalancing.py` (new) |
-| **5** | Wire fleet + rebalancing into registry tick loop | `simulation/registry.py` |
-| **6** | Add fleet metrics + dead-head layer to app | `simulation/app.py`, `simulation/layers.py` |
+| **1** | Wire trained model into `app.py` live dispatch loop | `rl_inference.py` exists; `app.py` needs `--use-rl` branch |
+| **2** | Phase 4 training (meal-time peaks, 1M steps) | Scaffold ready in `rl_training.py` |
+| **3** | A/B panel in Streamlit: RL policy vs. no-rebalancing | Show Hub 3 queue collapse without RL |
+| **4** | Real OSMnx ground times | `TRAFFIC_MULTIPLIER=1.0` stub still active in `ground_model.py` |
+| **5** | Wire building obstacles into corridor altitude | `obstacles.py` exists but `add_obstacles_to_corridors()` not called in pipeline |
+
+---
+
+## Roadmap Summary
+
+| Component | Status |
+|---|---|
+| Drone state machine (6 states) | ✅ Complete |
+| Poisson dispatcher + order queueing | ✅ Complete |
+| Finite fleet budget (FleetPool) | ✅ Complete |
+| Tidal flow detection | ✅ Complete (visible in hub queue depth) |
+| Pydeck + Streamlit live map | ✅ Complete |
+| Gymnasium RL environment (42D/9D) | ✅ Complete |
+| PPO curriculum training (Phases 1–3) | ✅ Complete — weights in `models/` |
+| RL model inference evaluation | ✅ Complete (`rl_inference.py`) |
+| Live RL policy in Streamlit sim | ⏳ Pending — next integration milestone |
+| Phase 4 training (meal-time peaks) | ⏳ Optional — scaffold ready |
