@@ -608,29 +608,35 @@ class DroneFleetEnv(gym.Env):
     def _execute_rebalancing_action(self, action: np.ndarray) -> None:
         """
         Execute rebalancing action: move drones between hubs.
-        
+
+        Routing — demand-aware (replaces original cyclic hub[i+1]):
+          For each hub i where action[i] > 0, drones are sent to the active
+          hub j (j ≠ i) with the highest demand pressure score:
+
+              pressure[j] = order_queues[j] / (idle_per_hub[j] + 1)
+
+          This allows the agent to learn direct hub-to-hub redistribution,
+          rather than depending on multi-hop cyclic chains to solve tidal drift.
+
         Constraints:
         - sum(action) must = 0 (conservation)
         - Can only rebalance if battery sufficient
         - Can only use idle drones
         """
-        
-        # Clip and normalize action to ensure feasibility
         action_clipped = np.clip(action, -5, 5)
-        
-        # Ensure sum = 0 (conservation constraint)
-        # If not, scale proportionally
         action_sum = np.sum(action_clipped)
         if abs(action_sum) > 1e-6:
-            # Add/remove to hub 0 (arbitrarily) to balance
             action_clipped[0] -= action_sum
-        
-        # Execute transfers: hub i → hub (i+1) if action[i] > 0
-        # This is simplified; in production, you'd model actual flights
-        
+
+        # Pre-compute demand pressure for routing decisions.
+        pressure = np.where(
+            self.fleet_state.idle_per_hub + 1 > 0,
+            self.order_queues / (self.fleet_state.idle_per_hub + 1.0),
+            0.0,
+        )
+
         for i in self.active_hub_indices:
             drones_to_send = int(max(0, action_clipped[i]))
-            
             if drones_to_send <= 0:
                 continue
 
@@ -639,7 +645,15 @@ class DroneFleetEnv(gym.Env):
             if len(eligible_drones) < drones_to_send:
                 continue
 
-            dest_hub = self._get_next_active_hub(i)
+            # Route to the active hub with highest demand pressure (not self).
+            dest_pressure = pressure.copy()
+            dest_pressure[i] = -1.0
+            # Restrict to active hub indices only.
+            mask = np.full(self.num_hubs, -np.inf)
+            mask[self.active_hub_indices] = dest_pressure[self.active_hub_indices]
+            dest_hub = int(np.argmax(mask))
+            if dest_hub == i or mask[dest_hub] <= 0.0:
+                dest_hub = self._get_next_active_hub(i)  # fallback to cyclic
             if dest_hub == i:
                 continue
 
@@ -844,28 +858,46 @@ class DroneFleetEnv(gym.Env):
     
     def _compute_reward(self) -> float:
         """
-        Multi-objective reward function (FIXED VERSION).
-        
-        Components:
-        1. Fulfillment bonus: +50 per order (orders actually being removed from queue)
-        2. Queue penalty: -10 per queued order (discourages backlog)
-        3. Craning penalty: -200 per craning drone
-        4. Dead-head cost: -5 per dead-heading drone
-        5. Idle bonus: +10 per idle drone above 5
-        
-        FIX: Scale final reward by 1000 to keep in reasonable range [-1000, +1000]
+        Multi-objective reward function — v2 (fixed reward saturation).
+
+        Changes from v1
+        ---------------
+        1. Queue penalty is capped at fleet_size × 10 so a 900-order backlog
+           does not produce a −9 000/step signal that drowns all other gradients.
+           The agent can still detect "bad" vs "worse" within the cap range.
+
+        2. Starved-hub penalty: −50 for every active hub that simultaneously
+           has pending orders AND zero idle drones.  This gives a sparse,
+           per-hub signal that directly incentivises pre-positioning before
+           demand peaks arrive.
+
+        Components
+        ----------
+        1. Fulfillment bonus  : +50 per order fulfilled this step
+        2. Queue penalty      : −10 per queued order, capped at fleet_size × 10
+        3. Starved-hub penalty: −50 per hub with queue > 3 AND idle == 0
+        4. Craning penalty    : −200 per craning drone
+        5. Dead-head cost     : −5 per dead-heading drone
+        6. Idle bonus         : +10 × (idle − 5) / fleet_size  (if idle > 5)
         """
-        
         fulfillment_bonus_raw = 50 * self.fleet_state.orders_fulfilled_this_step
 
-        # FIXED: Changed from wait_time to queue_length (more direct signal)
-        total_queue_length = int(np.sum(self.order_queues))
-        queue_penalty_raw = -10 * total_queue_length
+        # Capped queue penalty — prevents saturation at large backlogs.
+        total_queue_length = float(np.sum(self.order_queues))
+        queue_cap          = float(self.fleet_size * 10)   # e.g. 300 for fleet_30
+        queue_penalty_raw  = -10 * min(total_queue_length, queue_cap)
 
-        craning_penalty_raw = -200 * self.fleet_state.drones_craning
-        deadhead_penalty_raw = -5 * self.fleet_state.drones_deadheading
+        # Per-hub starvation penalty — rewards pre-positioning.
+        starved_hubs = sum(
+            1 for i in self.active_hub_indices
+            if self.order_queues[i] > 3 and self.fleet_state.idle_per_hub[i] == 0
+        )
+        starved_penalty_raw = -50 * starved_hubs
 
-        total_idle = float(np.sum(self.fleet_state.idle_per_hub))
+        craning_penalty_raw  = -200 * self.fleet_state.drones_craning
+        deadhead_penalty_raw = -5   * self.fleet_state.drones_deadheading
+
+        total_idle    = float(np.sum(self.fleet_state.idle_per_hub))
         idle_bonus_raw = 0.0
         if total_idle > 5:
             idle_bonus_raw = 10 * (total_idle - 5) / self.fleet_size
@@ -873,6 +905,7 @@ class DroneFleetEnv(gym.Env):
         raw_total = (
             fulfillment_bonus_raw
             + queue_penalty_raw
+            + starved_penalty_raw
             + craning_penalty_raw
             + deadhead_penalty_raw
             + idle_bonus_raw
@@ -880,16 +913,18 @@ class DroneFleetEnv(gym.Env):
 
         reward = raw_total / 100.0
         self.last_reward_components = {
-            "fulfillment_bonus": fulfillment_bonus_raw / 100.0,
-            "queue_penalty": queue_penalty_raw / 100.0,
-            "craning_penalty": craning_penalty_raw / 100.0,
-            "deadhead_penalty": deadhead_penalty_raw / 100.0,
-            "idle_bonus": idle_bonus_raw / 100.0,
-            "total": reward,
-            "queue_length": float(total_queue_length),
-            "orders_fulfilled_this_step": float(self.fleet_state.orders_fulfilled_this_step),
-            "deadheading_drones_this_step": float(self.fleet_state.drones_deadheading),
-            "idle_drones": total_idle,
+            "fulfillment_bonus":  fulfillment_bonus_raw  / 100.0,
+            "queue_penalty":      queue_penalty_raw       / 100.0,
+            "starved_penalty":    starved_penalty_raw     / 100.0,
+            "craning_penalty":    craning_penalty_raw     / 100.0,
+            "deadhead_penalty":   deadhead_penalty_raw    / 100.0,
+            "idle_bonus":         idle_bonus_raw          / 100.0,
+            "total":              reward,
+            "queue_length":       total_queue_length,
+            "starved_hubs":       float(starved_hubs),
+            "orders_fulfilled_this_step":     float(self.fleet_state.orders_fulfilled_this_step),
+            "deadheading_drones_this_step":   float(self.fleet_state.drones_deadheading),
+            "idle_drones":                    total_idle,
         }
 
         return reward

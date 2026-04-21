@@ -264,15 +264,25 @@ class RLBridge:
         fleet:  "FleetPool",
     ) -> tuple[int, int]:
         """
-        Apply 9D action to the FleetPool using instant-teleport semantics.
+        Apply 9D action to the FleetPool using demand-aware routing.
 
         Returns (moves_attempted, drones_relocated).
 
-        Logic mirrors DroneFleetEnv._execute_rebalancing_action():
-          - Clip to [-5, 5]
-          - Zero-sum normalise (conservation)
-          - For each hub i where action[i] > 0: move int(action[i]) drones
-            from hub[i] to hub[(i+1) % 9]
+        Routing strategy (replaces the original cyclic hub[i+1] destination):
+          The PPO model's source signal — "send drones FROM hub i" — is preserved.
+          Instead of cycling blindly to hub i+1, drones are routed to the active
+          hub with the highest demand pressure score:
+
+              pressure[j] = queue[j] / (idle[j] + 1)
+
+          This fixes the core tidal-flow failure: Hub 6's surplus can now reach
+          Hub 3 or Hub 9 directly rather than needing 7 cyclic hops.
+
+        Why the model's action magnitude is still valid:
+          The agent learned: "when my hub has excess idle drones AND others are
+          starving, output a large positive value for my hub index."  That signal
+          is correct even though the cyclic destination was wrong.  We keep the
+          magnitude (how many to send) and fix the direction (where to send them).
         """
         action_clipped = np.clip(action, -5.0, 5.0).astype(float)
 
@@ -280,6 +290,13 @@ class RLBridge:
         total = float(np.sum(action_clipped))
         if abs(total) > 1e-6:
             action_clipped[0] -= total
+
+        # Pre-compute demand pressure per hub: high = needs drones urgently.
+        # queue / (idle + 1) ensures zero-idle hubs with backlog score highest.
+        pressure = np.array([
+            fleet.queued_order_count(hub_id) / (fleet.idle_count(hub_id) + 1.0)
+            for hub_id in ACTIVE_HUB_IDS
+        ], dtype=float)
 
         moves_attempted  = 0
         drones_relocated = 0
@@ -289,11 +306,19 @@ class RLBridge:
             if n <= 0:
                 continue
 
-            dest_hub_id = ACTIVE_HUB_IDS[(i + 1) % len(ACTIVE_HUB_IDS)]
+            # Route to the most-pressured hub that is not self.
+            dest_pressure = pressure.copy()
+            dest_pressure[i] = -1.0  # exclude self
+            dest_idx = int(np.argmax(dest_pressure))
+
+            # If every other hub has pressure ≤ 0 (no demand anywhere), skip.
+            if dest_pressure[dest_idx] <= 0.0:
+                continue
+
+            dest_hub_id = ACTIVE_HUB_IDS[dest_idx]
             moves_attempted += 1
 
             for _ in range(n):
-                # reserve_rebalancing_drone is an alias for checkout_drone
                 if fleet.reserve_rebalancing_drone(hub_id):
                     fleet.checkin_drone(dest_hub_id)
                     drones_relocated += 1

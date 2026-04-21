@@ -49,13 +49,14 @@ class GhostConfig:
 
     heartbeat_steps : int
         How often the heuristic fires, expressed in environment steps.
-        At sim_speedup=60 (1 min / step), 5 steps = 5 simulated minutes.
-        At sim_speedup=1 (60 min / step), set this to 1.
+        At sim_speedup=60 (1 min / step), 3 steps = 3 simulated minutes.
+        Tighter heartbeat catches tidal drift before it builds into a
+        900-order backlog.
 
     pressure_threshold : float
         Minimum absolute pressure |P_i| before a hub is treated as a
-        donor or recipient. Lower values = more aggressive rebalancing.
-        Recommended: 2.0 (avoids micro-moves for ±1 drone fluctuations).
+        donor or recipient. Lowered to 1.0 so the heuristic acts after
+        a single-drone deviation from target, not two.
 
     battery_floor : float
         Minimum state-of-charge (0–1) required for a drone to be eligible
@@ -69,20 +70,20 @@ class GhostConfig:
 
     max_moves_per_heartbeat : int
         Upper bound on donor–recipient pairs resolved in one heartbeat tick.
-        Prevents the heuristic from overwhelming the fleet with dead-heads
-        during a cold start or after a long suppression window.
+        Raised to 4 so a heavily imbalanced network can recover faster
+        without overwhelming the fleet in a single tick.
 
     max_drones_per_move : int
         Upper bound on drones committed to a single donor→recipient transfer.
-        Keeps the move granular so the RL agent can still adapt.
+        Raised to 3 to allow faster recovery from deep tidal drift.
     """
-    heartbeat_steps: int       = 5
-    pressure_threshold: float  = 2.0
+    heartbeat_steps: int       = 3      # was 5 — tighter cadence
+    pressure_threshold: float  = 1.0    # was 2.0 — act on ±1 drone imbalance
     battery_floor: float       = 0.30
     dinner_suppress_start: float = 18.0
     dinner_suppress_end: float   = 20.0
-    max_moves_per_heartbeat: int = 3
-    max_drones_per_move: int     = 2
+    max_moves_per_heartbeat: int = 4    # was 3
+    max_drones_per_move: int     = 3    # was 2
 
 
 # ---------------------------------------------------------------------------
