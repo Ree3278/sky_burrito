@@ -1,16 +1,26 @@
 """
 Dispatcher — decides when to create a new payload order on a corridor.
 
-Each simulated tick, the dispatcher samples from a Poisson process at the
-aggregate λ for the current sim-time window and assigns the order to a
-corridor weighted by demand_weight.
+Each simulated tick, the dispatcher samples from a non-homogeneous Poisson
+process (NHPP) whose arrival rate λ(t) is modulated by time-of-day to match
+real food-delivery demand patterns:
 
-This is the stub NHPP: λ is held flat at the peak rate for the entire
-sim window. A real NHPP would vary λ(t) by 15-minute bucket.
+  - Off-peak baseline: 10 % of peak λ
+  - Breakfast peak  (~ 08:00): 40 % of peak λ
+  - Lunch peak      (~ 12:30): 100 % of peak λ
+  - Afternoon snack (~ 15:30): 30 % of peak λ
+  - Dinner peak     (~ 19:00): 100 % of peak λ
+
+``lambda_per_sim_s`` is the peak (maximum) arrival rate.  At each tick the
+effective rate is  λ(t) = lambda_per_sim_s × demand_multiplier(sim_hour).
+
+This replaces the original flat-λ stub that ran at peak rate all day and put
+the system under permanent stress, causing slow but persistent queue drift.
 """
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 from typing import List, TYPE_CHECKING
@@ -78,20 +88,30 @@ class Dispatcher:
 
         self._leftover: float = 0.0   # fractional arrivals carried over between ticks
 
-    def tick(self, dt_sim_s: float) -> List[DispatchRequest]:
+    def tick(self, dt_sim_s: float, sim_hour: float = 12.0) -> List[DispatchRequest]:
         """
         Generate payload order requests for this time step.
 
-        Uses a Poisson approximation: expected arrivals = λ × dt.
-        For small dt, P(≥1 arrival) ≈ λ × dt, so we draw from Poisson(λ × dt).
+        Uses a non-homogeneous Poisson process: the effective arrival rate is
+        ``lambda_per_sim_s × demand_multiplier(sim_hour)``.  This means demand
+        naturally troughs overnight and peaks at lunch/dinner, matching the
+        M/G/k sizing assumptions (which were calibrated to the peak rate only).
+
+        Parameters
+        ----------
+        dt_sim_s : float
+            Length of this tick in simulated seconds.
+        sim_hour : float
+            Current simulated hour in [0, 24).  Defaults to noon if not supplied.
 
         Returns a list of new order requests (may be empty).
         """
-        expected = self.lambda_per_sim_s * dt_sim_s + self._leftover
+        lambda_t = self.lambda_per_sim_s * self._demand_multiplier(sim_hour)
+        expected = lambda_t * dt_sim_s + self._leftover
         n_arrivals = int(expected)
         self._leftover = expected - n_arrivals
 
-        # Stochastic rounding: spawn the fractional drone probabilistically
+        # Stochastic rounding: carry the fractional arrival probabilistically.
         if random.random() < self._leftover:
             n_arrivals += 1
             self._leftover = 0.0
@@ -106,6 +126,29 @@ class Dispatcher:
             new_requests.append(request)
 
         return new_requests
+
+    @staticmethod
+    def _demand_multiplier(hour: float) -> float:
+        """
+        Return a scale factor ∈ [0.10, 1.00] representing relative demand at
+        the given hour.
+
+        The envelope is built from four Gaussian-shaped meal-time windows
+        (matching the RL observation features) plus a flat off-peak baseline.
+        Peak λ is reached at lunch (~12:30) and dinner (~19:00).
+
+        Why this shape?
+            Food-delivery platforms see ~10× swing between 3 AM and peak dinner.
+            Running at constant peak-rate all day is equivalent to assuming
+            customers order as frequently at midnight as at 7 PM, which leads
+            to permanent fleet stress and slow but persistent queue drift.
+        """
+        base       = 0.10
+        breakfast  = max(0.0, 1.0 - abs(hour -  8.0) / 1.0) * 0.40
+        lunch      = max(0.0, 1.0 - abs(hour - 12.5) / 1.5) * 1.00
+        snack      = max(0.0, 1.0 - abs(hour - 15.5) / 1.0) * 0.30
+        dinner     = max(0.0, 1.0 - abs(hour - 19.0) / 1.5) * 1.00
+        return base + max(breakfast, lunch, snack, dinner)
 
     def _pick_corridor(self) -> "ScoredCorridor.__class__":  # returns Corridor
         sc = random.choices(self.shortlist, weights=self._weights, k=1)[0]

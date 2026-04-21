@@ -77,7 +77,7 @@ class GhostConfig:
         Upper bound on drones committed to a single donor→recipient transfer.
         Raised to 3 to allow faster recovery from deep tidal drift.
     """
-    heartbeat_steps: int       = 3      # was 5 — tighter cadence
+    heartbeat_steps: int       = 1      # was 3 — fire every step, instant rebalancing
     pressure_threshold: float  = 1.0    # was 2.0 — act on ±1 drone imbalance
     battery_floor: float       = 0.30
     dinner_suppress_start: float = 18.0

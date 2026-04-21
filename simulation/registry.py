@@ -120,8 +120,9 @@ class DroneRegistry:
         4. Recount pad occupancy
         5. Return snapshot
         """
-        # 1. Spawn
-        new_requests = self._dispatcher.tick(dt_sim_s)
+        # 1. Spawn — pass sim_hour so dispatcher can modulate λ by time-of-day.
+        sim_hour = self._parse_sim_hour(sim_time_hhmm)
+        new_requests = self._dispatcher.tick(dt_sim_s, sim_hour)
         for request in new_requests:
             self._handle_order_request(request)
 
@@ -135,7 +136,7 @@ class DroneRegistry:
             self._rl_accumulator_s += dt_sim_s
             if self._rl_accumulator_s >= _RL_HEARTBEAT_S:
                 self._rl_accumulator_s = 0.0
-                sim_hour = self._parse_sim_hour(sim_time_hhmm)
+                # sim_hour already computed above for dispatcher
                 # Build a lightweight snapshot for the observation (reuse current fleet)
                 _obs_snap = _ObsSnapshot(
                     fleet       = self._fleet.snapshot(),
@@ -212,15 +213,65 @@ class DroneRegistry:
         self._total_orders_received += 1
 
         origin_hub_id = request.origin_hub_id
+
+        # If this hub already has a backlog, respect FIFO — queue and try to drain.
         if self._pending_orders_by_hub.get(origin_hub_id):
             self._queue_request(request)
             self._drain_origin_queue(origin_hub_id)
             return
 
+        # Try direct dispatch from the designated origin hub.
         if self._launch_request(request):
             return
 
+        # Cross-hub fallback: find another hub with an idle drone and a viable
+        # corridor to the same destination, then serve the order from there.
+        # This breaks the "locked-to-origin" bottleneck: customers get served
+        # from the nearest available hub instead of waiting for rebalancing.
+        alt = self._cross_hub_request(request)
+        if alt is not None and self._launch_request(alt):
+            return
+
+        # No drone available anywhere for this destination — queue at origin.
         self._queue_request(request)
+
+    def _cross_hub_request(
+        self, request: DispatchRequest
+    ) -> Optional[DispatchRequest]:
+        """
+        Find an alternative origin hub that can serve the same destination.
+
+        Searches the dispatcher's shortlisted corridors for any corridor whose
+        destination matches ``request``'s destination AND whose origin hub has
+        an idle drone.  Returns a new DispatchRequest using the shortest such
+        corridor (minimum flight distance), or None if no alternative exists.
+
+        Why shortest, not fastest?
+            All corridors share the same cruise speed, so shortest ≡ fastest.
+            We prefer the nearest alternative hub to minimise dead-head impact.
+        """
+        dest_hub_id = request.destination_hub_id
+        best_corridor = None
+        best_km = float("inf")
+
+        for sc in self._dispatcher.shortlist:
+            corr = sc.corridor
+            if (
+                corr.destination.id == dest_hub_id
+                and corr.origin.id != request.origin_hub_id
+                and self._fleet.has_idle_drone(corr.origin.id)
+                and corr.distance_km < best_km
+            ):
+                best_km = corr.distance_km
+                best_corridor = corr
+
+        if best_corridor is None:
+            return None
+
+        return DispatchRequest(
+            request_id=request.request_id,
+            corridor=best_corridor,
+        )
 
     def _queue_request(self, request: DispatchRequest) -> None:
         origin_hub_id = request.origin_hub_id
