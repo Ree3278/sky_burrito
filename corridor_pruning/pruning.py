@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING, Dict
 
 from .corridors import Corridor, generate_corridors
 from .drone_model import estimate_drone, DroneSpec
 from .ground_model import estimate_ground
+from .driver_economics import DriverEconomicsSpec
+from .carbon_footprint import calculate_carbon_savings
 
 if TYPE_CHECKING:
     import networkx as nx
@@ -55,27 +57,54 @@ TOP_N_CORRIDORS     = 20
 
 @dataclass
 class ScoredCorridor:
-    corridor:          Corridor
-    drone_time_s:      float
-    ground_time_s:     float
-    time_delta_s:      float          # ground − drone  (positive = drone wins)
-    drone_energy_wh:   float
-    ground_energy_wh:  float
-    energy_ratio:      float          # ground / drone  (>1 = drone more efficient)
-    demand_weight:     int
-    composite_score:   float
-    used_stubs:        bool           # True if any estimate used a fallback model
+    corridor:              Corridor
+    drone_time_s:          float
+    ground_time_s:         float
+    time_delta_s:          float          # ground − drone  (positive = drone wins)
+    drone_energy_wh:       float
+    ground_energy_wh:      float
+    energy_ratio:          float          # ground / drone  (>1 = drone more efficient)
+    demand_weight:         int
+    ground_cost_usd:       float          # What Uber pays for ground
+    drone_cost_usd:        float          # What we pay for drone
+    cost_arbitrage_usd:    float          # ground - drone (savings per order)
+    cost_ratio:            float          # ground / drone (multiplier)
+    uber_payout_breakdown: Dict[str, float]  # Detailed breakdown
+    drone_co2_g:           float          # Drone CO₂ emissions (grams)
+    ground_co2_g:          float          # Ground CO₂ emissions (grams)
+    co2_saved_g:           float          # Reduction per delivery
+    co2_reduction_pct:     float          # Percentage reduction
+    composite_score:       float
+    used_stubs:            bool           # True if any estimate used a fallback model
 
 
-def _composite(time_delta_s: float, demand_weight: int, energy_ratio: float) -> float:
-    """Higher is better. See module docstring for formula."""
-    return time_delta_s * math.log1p(demand_weight) * energy_ratio
+def _composite(
+    time_delta_s: float,
+    cost_arbitrage: float,
+    energy_ratio: float,
+    demand_weight: int,
+) -> float:
+    """
+    Higher is better. Weighted composite score.
+    
+    Weighting: 60% cost, 20% time, 20% energy.
+    (Cost is the dominant factor from the platform's perspective.)
+    """
+    demand_factor = math.log1p(demand_weight)
+    
+    time_score   = time_delta_s * demand_factor * 0.20
+    cost_score   = cost_arbitrage * demand_factor * 0.60
+    energy_score = energy_ratio * demand_factor * 0.20
+    
+    return time_score + cost_score + energy_score
 
 
 def score_corridor(
     corridor: Corridor,
     drone_spec: DroneSpec = DroneSpec(),
+    driver_spec: DriverEconomicsSpec = DriverEconomicsSpec(),
     G: "Optional[nx.MultiDiGraph]" = None,
+    sim_hour: int = 19,
 ) -> ScoredCorridor:
     """
     Run both models against a single Corridor and return a ScoredCorridor.
@@ -85,8 +114,12 @@ def score_corridor(
     corridor : Corridor
     drone_spec : DroneSpec
         Hardware parameters. Defaults to DJI Matrice 350 RTK class.
+    driver_spec : DriverEconomicsSpec
+        Uber's payout formula. Defaults to Friday evening peak (hour 19).
     G : networkx.MultiDiGraph or None
         OSMnx street graph. None → stub ground model.
+    sim_hour : int
+        Hour (0-23) for surge pricing. Default 19 (7 PM Friday).
     """
     drone = estimate_drone(
         straight_line_m  = corridor.straight_line_m,
@@ -101,12 +134,32 @@ def score_corridor(
         origin_lon      = corridor.origin.lon,
         dest_lat        = corridor.destination.lat,
         dest_lon        = corridor.destination.lon,
+        driver_spec     = driver_spec,
+        sim_hour        = sim_hour,
     )
 
-    time_delta_s  = ground.total_time_s - drone.total_time_s
-    energy_ratio  = ground.energy_wh / drone.total_energy_wh
-    demand_weight = corridor.demand_weight
-    score         = _composite(time_delta_s, demand_weight, energy_ratio)
+    time_delta_s   = ground.total_time_s - drone.total_time_s
+    energy_ratio   = ground.energy_wh / drone.total_energy_wh
+    demand_weight  = corridor.demand_weight
+    
+    # Cost arbitrage
+    cost_arbitrage = ground.total_cost_usd - drone.total_cost_usd
+    cost_ratio     = ground.total_cost_usd / drone.total_cost_usd
+    
+    # Carbon footprint calculation
+    # ground.road_distance_m in meters, convert to miles; 
+    # ground.traffic_penalty_s in seconds, convert to hours
+    ground_distance_miles = ground.road_distance_m / 1609.34
+    ground_idle_hours = ground.traffic_penalty_s / 3600
+    
+    carbon = calculate_carbon_savings(
+        drone_energy_wh=drone.total_energy_wh,
+        ground_distance_miles=ground_distance_miles,
+        ground_idle_time_hours=ground_idle_hours,
+    )
+    
+    # Updated composite score with cost weighting
+    score = _composite(time_delta_s, cost_arbitrage, energy_ratio, demand_weight)
 
     # Write results back onto the corridor object for later inspection
     corridor.drone_time_s    = drone.total_time_s
@@ -116,25 +169,37 @@ def score_corridor(
     corridor.time_delta_s    = time_delta_s
 
     return ScoredCorridor(
-        corridor        = corridor,
-        drone_time_s    = drone.total_time_s,
-        ground_time_s   = ground.total_time_s,
-        time_delta_s    = time_delta_s,
-        drone_energy_wh = drone.total_energy_wh,
-        ground_energy_wh= ground.energy_wh,
-        energy_ratio    = energy_ratio,
-        demand_weight   = demand_weight,
-        composite_score = score,
-        used_stubs      = drone.used_fallback_altitude or ground.used_stub,
+        corridor              = corridor,
+        drone_time_s          = drone.total_time_s,
+        ground_time_s         = ground.total_time_s,
+        time_delta_s          = time_delta_s,
+        drone_energy_wh       = drone.total_energy_wh,
+        ground_energy_wh      = ground.energy_wh,
+        energy_ratio          = energy_ratio,
+        demand_weight         = demand_weight,
+        ground_cost_usd       = ground.total_cost_usd,
+        drone_cost_usd        = drone.total_cost_usd,
+        cost_arbitrage_usd    = cost_arbitrage,
+        cost_ratio            = cost_ratio,
+        uber_payout_breakdown = ground.uber_payout_breakdown,
+        drone_co2_g           = carbon.drone_co2_g,
+        ground_co2_g          = carbon.ground_co2_g,
+        co2_saved_g           = carbon.co2_saved_g,
+        co2_reduction_pct     = carbon.co2_reduction_pct,
+        composite_score       = score,
+        used_stubs            = drone.used_fallback_altitude or ground.used_stub,
     )
 
 
 def prune_corridors(
     drone_spec: DroneSpec = DroneSpec(),
+    driver_spec: DriverEconomicsSpec = DriverEconomicsSpec(),
     G: "Optional[nx.MultiDiGraph]" = None,
+    sim_hour: int = 19,
     min_time_delta_s: int  = MIN_TIME_DELTA_S,
     min_demand_weight: int = MIN_DEMAND_WEIGHT,
     top_n: int             = TOP_N_CORRIDORS,
+    buildings_csv: Optional[str] = "Building_Footprints_20260410.csv",
 ) -> List[ScoredCorridor]:
     """
     Score all 132 corridors, apply filters, rank by composite score.
@@ -142,13 +207,20 @@ def prune_corridors(
     Parameters
     ----------
     drone_spec : DroneSpec
+    driver_spec : DriverEconomicsSpec
+        Uber's payout formula. Defaults to Friday evening peak.
     G : OSMnx graph (optional, improves ground time accuracy)
+    sim_hour : int
+        Hour (0-23) for surge pricing. Default 19 (7 PM Friday).
     min_time_delta_s : int
         Drop routes where drone saves less than this many seconds.
     min_demand_weight : int
         Drop routes below this supply–demand product.
     top_n : int
         Return at most this many corridors.
+    buildings_csv : str or None
+        Path to Building_Footprints CSV. If provided, loads real obstacle heights.
+        If None, uses fallback (120m assumed altitude).
 
     Returns
     -------
@@ -156,7 +228,18 @@ def prune_corridors(
         Sorted by composite_score descending.
     """
     corridors = generate_corridors()
-    scored    = [score_corridor(c, drone_spec, G) for c in corridors]
+    
+    # Load real building obstacle heights if CSV provided
+    if buildings_csv:
+        try:
+            from .obstacles import get_buildings_gdf, add_obstacles_to_corridors
+            buildings_gdf = get_buildings_gdf(buildings_csv)
+            add_obstacles_to_corridors(corridors, buildings_gdf)
+        except Exception as e:
+            print(f"  ⚠️  Could not load obstacles: {e}")
+            print(f"     Using fallback obstacle heights (120m assumed altitude)\n")
+    
+    scored    = [score_corridor(c, drone_spec, driver_spec, G, sim_hour) for c in corridors]
 
     # Apply filters
     filtered = [
@@ -170,7 +253,7 @@ def prune_corridors(
     ranked = sorted(filtered, key=lambda s: s.composite_score, reverse=True)
     shortlist = ranked[:top_n]
 
-    _print_summary(scored, filtered, shortlist)
+    _print_summary(scored, filtered, shortlist, sim_hour)
     return shortlist
 
 
@@ -178,43 +261,73 @@ def _print_summary(
     all_scored: List[ScoredCorridor],
     filtered: List[ScoredCorridor],
     shortlist: List[ScoredCorridor],
+    sim_hour: int = 19,
 ) -> None:
     stubs = sum(1 for s in all_scored if s.used_stubs)
 
-    print(f"\n{'='*72}")
-    print(f"  CORRIDOR PRUNING RESULTS")
-    print(f"{'='*72}")
+    print(f"\n{'='*80}")
+    print(f"  CORRIDOR PRUNING RESULTS — UBER PLATFORM ECONOMICS")
+    print(f"  (Friday {sim_hour}:00)")
+    print(f"{'='*80}")
     print(f"  Total corridors scored : {len(all_scored):>4}")
     print(f"  Passed all filters     : {len(filtered):>4}")
     print(f"  Final shortlist        : {len(shortlist):>4}")
-    print(f"  Corridors using stubs  : {stubs:>4}  ⚠ see MISSING_INPUTS")
-    print(f"{'='*72}")
+    print(f"  Corridors using stubs  : {stubs:>4}")
+    print(f"{'='*80}")
 
     if not shortlist:
         print("  ⚠  No corridors passed the filter. "
               "Try lowering min_time_delta_s or min_demand_weight.")
         return
 
-    header = f"{'Rank':<5} {'Corridor':<22} {'Δt (s)':>8} {'E-ratio':>8} {'Demand':>10} {'Score':>10} {'Stubs'}"
+    # Main cost comparison table
+    header = f"{'Rank':<5} {'Corridor':<20} {'Uber Cost':>12} {'Drone Cost':>12} {'Savings':>12} {'Ratio':>8}"
     print(f"\n  {header}")
-    print(f"  {'-'*72}")
+    print(f"  {'-'*80}")
     for rank, s in enumerate(shortlist, 1):
         stub_flag = "⚠" if s.used_stubs else "✓"
         print(
             f"  {rank:<5}"
-            f" {s.corridor.label:<22}"
-            f" {s.time_delta_s:>8.0f}"
-            f" {s.energy_ratio:>8.2f}×"
-            f" {s.demand_weight:>10,}"
-            f" {s.composite_score:>10.0f}"
-            f"  {stub_flag}"
+            f" {s.corridor.label:<20}"
+            f" ${s.ground_cost_usd:>11.2f}"
+            f" ${s.drone_cost_usd:>11.2f}"
+            f" ${s.cost_arbitrage_usd:>11.2f}"
+            f" {s.cost_ratio:>7.1f}×"
         )
 
-    print(f"\n  Top pick: {shortlist[0].corridor.label}")
-    print(f"    Drone: {shortlist[0].drone_time_s/60:.1f} min  |  "
-          f"Car: {shortlist[0].ground_time_s/60:.1f} min  |  "
-          f"Δt: {shortlist[0].time_delta_s/60:.1f} min saved")
-    print(f"{'='*72}\n")
+    # Top pick details with full breakdown
+    top = shortlist[0]
+    print(f"\n  Top Corridor: {top.corridor.label}")
+    print(f"    Distance: {top.corridor.straight_line_m/1000:.2f} km straight line")
+    print(f"    Time savings: {top.time_delta_s/60:.1f} minutes")
+    print(f"    Cost savings: ${top.cost_arbitrage_usd:.2f} per delivery")
+    print(f"    Carbon savings: {top.co2_saved_g/1000:.2f} kg CO₂ per delivery ({top.co2_reduction_pct:.1f}% reduction)")
+    
+    print(f"\n    Uber Payout Breakdown:")
+    breakdown = top.uber_payout_breakdown
+    print(f"      Time component:      ${breakdown['time_component']:>8.2f}  ($0.35/min)")
+    print(f"      Distance component:  ${breakdown['distance_component']:>8.2f}  ($1.25/mi)")
+    print(f"      Subtotal:            ${breakdown['subtotal']:>8.2f}")
+    print(f"      Service fee (25%):  -${breakdown['service_fee']:>7.2f}")
+    print(f"      Base pay:            ${breakdown['base_pay']:>8.2f}")
+    print(f"      Surge multiplier:    {breakdown['surge_multiplier']:>8.1f}×")
+    print(f"      ────────────────────────────────")
+    print(f"      Total Uber pays:     ${breakdown['total_uber_payout']:>8.2f}")
+    
+    print(f"\n    Drone Cost & Energy Breakdown:")
+    print(f"      Total energy: {top.drone_energy_wh:.1f} Wh (Climb {top.drone_energy_wh*0.3:.0f} + Cruise {top.drone_energy_wh*0.7:.0f})")
+    print(f"      Battery cost (@$0.12/kWh):  ${(top.drone_energy_wh / 1000) * 0.12:>8.2f}")
+    print(f"      Maintenance (@$0.016/mi):   ${(top.corridor.straight_line_m / 1609.34) * 0.016:>8.2f}")
+    print(f"      ────────────────────────────────")
+    print(f"      Total drone cost:    ${top.drone_cost_usd:>8.2f}")
+    
+    print(f"\n    Environmental Impact:")
+    print(f"      Drone CO₂:     {top.drone_co2_g:>8.1f} g ({top.drone_co2_g/1000:>6.3f} kg)")
+    print(f"      Ground CO₂:    {top.ground_co2_g:>8.1f} g ({top.ground_co2_g/1000:>6.3f} kg)")
+    print(f"      CO₂ saved:     {top.co2_saved_g:>8.1f} g ({top.co2_saved_g/1000:>6.3f} kg) per delivery")
+    print(f"      Reduction:     {top.co2_reduction_pct:>8.1f}%")
+    
+    print(f"{'='*80}\n")
 
 
 # ── What's missing ───────────────────────────────────────────────────────────
