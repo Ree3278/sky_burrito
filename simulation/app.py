@@ -44,6 +44,7 @@ from simulation.config import (
 from simulation.clock import SimClock
 from simulation.dispatcher import Dispatcher
 from simulation.registry import DroneRegistry
+from simulation.rl_bridge import RLBridge
 from simulation.layers import (
     corridor_arc_layer,
     hub_scatter_layer,
@@ -302,6 +303,18 @@ def load_network(demand_scale: float = 1.0, use_auto_swap: bool = False):
     return top_routes, sizing, hubs_lookup, active_hub_ids
 
 
+@st.cache_resource
+def load_rl_bridge(fleet_size: int, enabled: bool) -> RLBridge:
+    """Load and cache the PPO rebalancing model for the given fleet size."""
+    if not enabled:
+        return RLBridge(model_path="", fleet_size=fleet_size, enabled=False)
+    model_path = (
+        _ROOT / "models" / f"fleet_{fleet_size}"
+        / f"ppo_fleet_{fleet_size}_phase_3.zip"
+    )
+    return RLBridge(model_path=model_path, fleet_size=fleet_size, enabled=True)
+
+
 # ── Sidebar controls ──────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🌯 Sky Burrito")
@@ -325,6 +338,25 @@ with st.sidebar:
         "▣ Pad count override (0 = use M/G/k recommendation)",
         min_value=0, max_value=10, value=0,
         help="Force a pad count on every hub to explore craning behavior",
+    )
+
+    st.divider()
+    st.caption("**🤖 RL Fleet Rebalancing**")
+    rl_enabled = st.toggle(
+        "Enable PPO rebalancing agent",
+        value=False,
+        help=(
+            "Loads the trained PPO model and fires a rebalancing action "
+            "every 60 simulated seconds. Drones are redistributed across "
+            "hubs to prevent tidal flow build-up."
+        ),
+    )
+    rl_fleet_size = st.select_slider(
+        "Fleet size (model variant)",
+        options=[10, 20, 30, 40, 50],
+        value=20,
+        help="Which trained model variant to use. Fleet 20 ran the full 3-phase curriculum.",
+        disabled=not rl_enabled,
     )
 
     st.divider()
@@ -353,6 +385,8 @@ if "registry" not in st.session_state:
     st.session_state.registry = None
 if "snapshot" not in st.session_state:
     st.session_state.snapshot = None
+if "rl_bridge" not in st.session_state:
+    st.session_state.rl_bridge = None
 
 # ── Button logic ─────────────────────────────────────────────────────────────
 top_routes, sizing, active_hubs_lookup, active_hub_ids = load_network(demand_scale, use_auto_swap)
@@ -382,14 +416,17 @@ if btn_reset or (btn_start and st.session_state.registry is None):
         shortlist=top_routes,
         lambda_per_sim_s=(200 * demand_scale) / 3600,
     )
+    bridge = load_rl_bridge(fleet_size=rl_fleet_size, enabled=rl_enabled)
     registry = DroneRegistry(
         hub_sizing_results=sizing,
         dispatcher=dispatcher,
+        rl_bridge=bridge if rl_enabled else None,
     )
-    st.session_state.clock    = clock
-    st.session_state.registry = registry
-    st.session_state.running  = not btn_reset
-    st.session_state.snapshot = None
+    st.session_state.clock     = clock
+    st.session_state.registry  = registry
+    st.session_state.rl_bridge = bridge
+    st.session_state.running   = not btn_reset
+    st.session_state.snapshot  = None
 
 if btn_start:
     st.session_state.running = True
@@ -521,10 +558,25 @@ def _render_featured_route() -> None:
 
 
 def _render_metrics(snapshot) -> None:
+    bridge: RLBridge | None = st.session_state.get("rl_bridge")
+    rl_active = bridge is not None and bridge.is_available
+
     with metrics_placeholder.container():
+        # ── Top status cards ───────────────────────────────────────────────
+        rl_badge = (
+            f'<span style="color:#5bb85b;font-size:0.75rem;font-weight:700;">'
+            f'● PPO active (fleet {bridge.fleet_size if bridge else "—"})</span>'
+            if rl_active else
+            '<span style="color:#a0aab4;font-size:0.75rem;">○ PPO off</span>'
+        )
+        rl_moves_label = (
+            f"{snapshot.rl_drones_rebalanced} drones repositioned"
+            if rl_active else "Enable in sidebar"
+        )
+
         st.markdown(
             f"""
-            <div class="sim-status-grid">
+            <div class="sim-status-grid" style="grid-template-columns:repeat(5,minmax(0,1fr));">
               <div class="sim-status-card">
                 <div class="sim-status-label">Sim Time</div>
                 <div class="sim-status-value">{snapshot.sim_time_hhmm}</div>
@@ -533,7 +585,7 @@ def _render_metrics(snapshot) -> None:
               <div class="sim-status-card">
                 <div class="sim-status-label">Active Drones</div>
                 <div class="sim-status-value">{snapshot.total_active_drones}</div>
-                <div class="sim-status-meta">{snapshot.fleet.total_idle} idle drones available</div>
+                <div class="sim-status-meta">{snapshot.fleet.total_idle} idle at hubs</div>
               </div>
               <div class="sim-status-card">
                 <div class="sim-status-label">Queued Orders</div>
@@ -543,12 +595,22 @@ def _render_metrics(snapshot) -> None:
               <div class="sim-status-card">
                 <div class="sim-status-label">Craning Now</div>
                 <div class="sim-status-value">{snapshot.total_craning}</div>
-                <div class="sim-status-meta">{snapshot.total_craning_events} total craning events</div>
+                <div class="sim-status-meta">{snapshot.total_craning_events} total events</div>
+              </div>
+              <div class="sim-status-card">
+                <div class="sim-status-label">RL Rebalancing {rl_badge}</div>
+                <div class="sim-status-value">{snapshot.rl_rebalancing_moves}</div>
+                <div class="sim-status-meta">{rl_moves_label}</div>
               </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+        # ── RL load error banner ───────────────────────────────────────────
+        if bridge and not bridge.is_available and bridge.load_error:
+            st.warning(f"⚠️ RL model unavailable: {bridge.load_error}", icon="🤖")
+
 
         st.divider()
         st.markdown("**Hub pad utilisation**")

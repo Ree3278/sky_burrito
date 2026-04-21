@@ -23,9 +23,13 @@ import math
 import sys
 import os
 
-# Add hub_sizing to path for MGk import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'hub_sizing'))
+# Add project root to path for cross-package imports
+_PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
+sys.path.insert(0, os.path.join(_PROJECT_ROOT, 'hub_sizing'))
+sys.path.insert(0, _PROJECT_ROOT)
+
 from mgk import solve_k, MGKResult
+from rebalancing.ghost_logic import GhostHeuristic, GhostConfig, GhostMove
 
 
 # ============================================================================
@@ -339,6 +343,23 @@ class DroneFleetEnv(gym.Env):
         self.episode_orders_fulfilled = 0
         self.episode_orders_total = 0
         self.last_reward_components: Dict[str, float] = {}
+
+        # ── Ghost Heuristic (pressure-based dead-head rebalancing) ──────────
+        # Fires every `_ghost_heartbeat_steps` environment steps alongside the
+        # RL agent's action.  Heartbeat is time-based: targets ~5 sim-minutes
+        # regardless of sim_speedup.
+        self._ghost_config = GhostConfig()
+        self._ghost_heuristic = GhostHeuristic(
+            hub_names=self.hub_names,
+            viable_routes=VIABLE_ROUTES,
+            config=self._ghost_config,
+        )
+        # heartbeat: every 5 simulated minutes
+        self._ghost_heartbeat_steps: int = max(1, round(5.0 / self.step_minutes))
+        self._ghost_step_counter: int = 0
+        # Episode-level ghost stats (reset on env.reset())
+        self.episode_ghost_moves: int = 0
+        self.episode_ghost_drones: int = 0
         
     def reset(self, seed: Optional[int] = None, **kwargs) -> Tuple[np.ndarray, Dict]:
         """
@@ -399,6 +420,11 @@ class DroneFleetEnv(gym.Env):
         self.episode_orders_fulfilled = 0
         self.episode_orders_total = 0
         self.last_reward_components = {}
+
+        # Reset ghost heuristic counters
+        self._ghost_step_counter = 0
+        self.episode_ghost_moves = 0
+        self.episode_ghost_drones = 0
 
         self._sync_fleet_state()
         
@@ -520,13 +546,21 @@ class DroneFleetEnv(gym.Env):
         # 1. Update drone states from the previous step
         self._update_fleet_states()
 
-        # 2. Process action (rebalance drones)
+        # 2. Process RL agent's action (cyclic rebalancing)
         self._execute_rebalancing_action(action)
-        
-        # 3. Simulate demand generation
+
+        # 3. Ghost heuristic heartbeat (pressure-based dead-head rebalancing).
+        #    Fires every ~5 simulated minutes alongside the RL policy.
+        #    Handles slow tidal drift that the cyclic RL action cannot fix.
+        self._ghost_step_counter += 1
+        if self._ghost_step_counter >= self._ghost_heartbeat_steps:
+            self._ghost_step_counter = 0
+            self._execute_ghost_heuristic()
+
+        # 4. Simulate demand generation
         self._generate_orders()
-        
-        # 4. Fulfill orders using hub-local idle drones
+
+        # 5. Fulfill orders using hub-local idle drones
         self._fulfill_orders()
 
         self._sync_fleet_state()
@@ -557,6 +591,9 @@ class DroneFleetEnv(gym.Env):
             "active_hubs": self.active_hubs,
             "step_minutes": self.step_minutes,
             "reward_components": dict(self.last_reward_components),
+            # Ghost heuristic diagnostics
+            "ghost_moves_episode": self.episode_ghost_moves,
+            "ghost_drones_episode": self.episode_ghost_drones,
         }
         
         # Track episode reward
@@ -611,6 +648,84 @@ class DroneFleetEnv(gym.Env):
                 drone.battery_level = max(0.0, drone.battery_level - min_battery)
                 self.fleet_state.drones_deadheading += 1
     
+    def _execute_ghost_heuristic(self) -> int:
+        """
+        Phase 3 — Environment hook for the Ghost Heuristic.
+
+        Runs between the RL action and demand generation so that repositioned
+        drones are available to serve the orders that arrive this step.
+
+        Execution flow
+        --------------
+        1. Suppression check    — skip entirely during dinner rush (18–20 h).
+        2. Pressure computation — P_i = idle_i − queue_i − T_i per hub.
+        3. Donor–recipient match— greedy nearest-flight-time pairing.
+        4. Guardrail checks     — battery floor + craning-risk check per move.
+        5. Teleport execution   — same instant-teleport as RL rebalancing action.
+
+        Returns
+        -------
+        int
+            Number of drones actually relocated this tick.
+        """
+        # ── Guardrail: dinner-rush suppression ──────────────────────────────
+        if self._ghost_heuristic.should_suppress(self.current_hour):
+            self._ghost_heuristic.suppressed_ticks += 1
+            return 0
+
+        # ── Phase 1: compute pressure ────────────────────────────────────────
+        target_inv = self._ghost_heuristic.compute_target_inventory(self.fleet_size)
+        pressures  = self._ghost_heuristic.compute_pressure(
+            idle_per_hub     = self.fleet_state.idle_per_hub,
+            order_queues     = self.order_queues,
+            target_inventory = target_inv,
+        )
+
+        # ── Phase 2: match donors to recipients ─────────────────────────────
+        moves: List[GhostMove] = self._ghost_heuristic.match_donors_to_recipients(
+            pressures          = pressures,
+            active_hub_indices = self.active_hub_indices,
+        )
+
+        if not moves:
+            return 0
+
+        # ── Phase 3 / 4: execute moves with guardrails ──────────────────────
+        drones_relocated = 0
+
+        for move in moves:
+            # Guardrail: craning check — skip if recipient is already congested.
+            if not GhostHeuristic.recipient_is_safe(
+                recipient_idx        = move.recipient_idx,
+                utilization_per_hub  = self.fleet_state.utilization_per_hub,
+            ):
+                continue
+
+            # Guardrail: battery floor — only eligible drones may dead-head.
+            battery_cost = DEADHEAD_BATTERY_REQUIRED.get(
+                self.hub_names[move.donor_idx], 0.15
+            )
+            min_soc = max(self._ghost_config.battery_floor, battery_cost)
+            eligible = self._idle_drones_at_hub(move.donor_idx, min_battery=min_soc)
+
+            actual_n = min(move.n_drones, len(eligible))
+            if actual_n <= 0:
+                continue
+
+            # Execute: teleport drones from donor → recipient hub, drain battery.
+            for drone in eligible[:actual_n]:
+                drone.hub_id       = move.recipient_idx
+                drone.battery_level = max(0.0, drone.battery_level - battery_cost)
+                self.fleet_state.drones_deadheading += 1
+
+            drones_relocated        += actual_n
+            self.episode_ghost_moves += 1
+            self.episode_ghost_drones += actual_n
+            self._ghost_heuristic.total_ghost_moves  += 1
+            self._ghost_heuristic.total_ghost_drones += actual_n
+
+        return drones_relocated
+
     def _generate_orders(self) -> None:
         """
         Generate new orders using M/G/k queueing model.

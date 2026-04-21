@@ -14,8 +14,8 @@ Responsibilities
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
-from typing import Deque, Dict, List, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Deque, Dict, List, Optional, TYPE_CHECKING
 
 from .drone import Drone, DroneState
 from .dispatcher import DispatchRequest, Dispatcher
@@ -23,6 +23,10 @@ from .fleet import FleetPool, FleetSnapshot
 
 if TYPE_CHECKING:
     from hub_sizing.sizing import HubSizingResult
+    from .rl_bridge import RLBridge
+
+# RL heartbeat: fire once per simulated minute regardless of tick rate.
+_RL_HEARTBEAT_S: float = 60.0
 
 
 @dataclass
@@ -57,6 +61,9 @@ class SimSnapshot:
     total_orders_received: int
     total_orders_dispatched: int
     total_craning_events: int
+    # RL rebalancing stats (0 when RL is disabled)
+    rl_rebalancing_moves:  int = field(default=0)
+    rl_drones_rebalanced:  int = field(default=0)
 
 
 class DroneRegistry:
@@ -76,6 +83,7 @@ class DroneRegistry:
         hub_sizing_results: "List[HubSizingResult]",
         dispatcher: Dispatcher,
         fleet_pool: FleetPool | None = None,
+        rl_bridge: "Optional[RLBridge]" = None,
     ):
         self._hub_sizing_results = list(hub_sizing_results)
         self._drones: Dict[int, Drone] = {}
@@ -94,6 +102,12 @@ class DroneRegistry:
         self._total_orders = 0
         self._total_craning_events = 0
 
+        # ── RL rebalancing bridge ──────────────────────────────────────────
+        self._rl_bridge: "Optional[RLBridge]" = rl_bridge
+        self._rl_accumulator_s: float = 0.0   # time since last RL heartbeat
+        self._rl_total_moves:  int = 0
+        self._rl_total_drones: int = 0
+
     # ── Tick ─────────────────────────────────────────────────────────────────
 
     def tick(self, dt_sim_s: float, sim_time_hhmm: str) -> SimSnapshot:
@@ -110,6 +124,28 @@ class DroneRegistry:
         new_requests = self._dispatcher.tick(dt_sim_s)
         for request in new_requests:
             self._handle_order_request(request)
+
+        # 1b. RL rebalancing heartbeat — fires every ~60 simulated seconds.
+        #     Runs after spawning new orders (so the observation reflects fresh
+        #     demand) but before moving drones (so relocated drones can serve
+        #     orders this tick).
+        rl_moves_this_tick  = 0
+        rl_drones_this_tick = 0
+        if self._rl_bridge is not None and self._rl_bridge.is_available:
+            self._rl_accumulator_s += dt_sim_s
+            if self._rl_accumulator_s >= _RL_HEARTBEAT_S:
+                self._rl_accumulator_s = 0.0
+                sim_hour = self._parse_sim_hour(sim_time_hhmm)
+                # Build a lightweight snapshot for the observation (reuse current fleet)
+                _obs_snap = _ObsSnapshot(
+                    fleet       = self._fleet.snapshot(),
+                    hub_metrics = self._hub_metrics,
+                )
+                result = self._rl_bridge.step(_obs_snap, self._fleet, sim_hour)
+                rl_moves_this_tick  = result.drones_relocated  # count moves by drones moved
+                rl_drones_this_tick = result.drones_relocated
+                self._rl_total_moves  += result.moves_attempted
+                self._rl_total_drones += result.drones_relocated
 
         # 2. Move
         self._recount_pads()   # refresh before checking pad availability
@@ -151,6 +187,8 @@ class DroneRegistry:
             total_orders_received  = self._total_orders_received,
             total_orders_dispatched= self._total_orders,
             total_craning_events   = self._total_craning_events,
+            rl_rebalancing_moves   = self._rl_total_moves,
+            rl_drones_rebalanced   = self._rl_total_drones,
         )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -253,3 +291,29 @@ class DroneRegistry:
         self._total_orders_received = 0
         self._total_orders = 0
         self._total_craning_events = 0
+        self._rl_accumulator_s = 0.0
+        self._rl_total_moves   = 0
+        self._rl_total_drones  = 0
+        if self._rl_bridge is not None:
+            self._rl_bridge.reset_episode()
+
+    @staticmethod
+    def _parse_sim_hour(hhmm: str) -> float:
+        """Convert '18:42' → 18.7."""
+        try:
+            h, m = hhmm.split(":")
+            return int(h) + int(m) / 60.0
+        except (ValueError, AttributeError):
+            return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Lightweight snapshot proxy used for RL observation building.
+# Avoids building a full SimSnapshot just for the RL step.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _ObsSnapshot:
+    """Minimal snapshot passed to RLBridge.step() at each heartbeat."""
+    fleet: FleetSnapshot
+    hub_metrics: Dict[int, "HubMetrics"]
