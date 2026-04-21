@@ -351,6 +351,7 @@ Top corridor:
 
 - `Hub 11 -> Hub 9`
 <<<<<<< HEAD
+<<<<<<< HEAD
 - drone time: `4.3 min`
 - ground time: `10.4 min`
 - time saved: `6.1 min`
@@ -362,17 +363,27 @@ Current verified result:
 - drone time: 4.3 min
 - car time: 10.4 min
 - delta: 6.1 min saved
+=======
+- drone time: `4.3 min`
+- ground time: `10.4 min`
+- time saved: `6.1 min`
+>>>>>>> 784e2b7 (final report added)
 
-Other top-ranked corridors are concentrated around Hubs 1, 2, 6, 9, 10, and 11, which strongly suggests the model is already identifying a core operational spine rather than spreading demand evenly.
+### Hub sizing, manual service scenario
 
+<<<<<<< HEAD
 ### Hub sizing
 
 Manual service scenario:
 >>>>>>> 543e44e (summary report added)
+=======
+Current verified result:
+>>>>>>> 784e2b7 (final report added)
 
 - 10 active hubs sized
 - 53 landing pads
 - 53 battery bays
+<<<<<<< HEAD
 <<<<<<< HEAD
 
 Heavy hubs:
@@ -471,114 +482,103 @@ Sky Burrito is currently a strong prototype research codebase with a credible an
 The architecture is already good. The limiting factor is no longer structure; it is calibration. Once the stubbed obstacle, traffic, demand, and service inputs are replaced with measured or route-specific data, this project can move from a convincing prototype to a much more defensible operational planning tool.
 =======
 - heavy hubs: 1, 11, 2, 6, 7
+=======
+>>>>>>> 784e2b7 (final report added)
 
-Automated swap scenario:
+Heavy hubs:
 
-- 10 active hubs sized
-- 37 landing pads
-- 37 battery bays
+- Hub 1
+- Hub 11
+- Hub 2
+- Hub 6
+- Hub 7
 
-Main business takeaway:
+### Hub sizing, automated swap implication
 
-- automated swap reduces total pad requirement by 16 pads, about 30 percent
+The code still supports the faster automated service spec:
 
-That is one of the clearest strategic outputs in the whole repo.
+- manual scenario total: `53 pads`
+- automated scenario total from project docs: `37 pads`
+- strategic reduction: `16 pads`, about `30%`
 
-## 6. What Is Working Well
+This remains one of the clearest business-level outputs in the repo.
 
-- The repo has successfully evolved from exploratory notebooks into a modular Python project.
-- The analytical progression is coherent: raw spatial data -> hub siting -> corridor pruning -> hub sizing -> live simulation.
-- The code reflects a clear systems view rather than isolated models.
-- The pruning and sizing stages are executable today and produce stable outputs.
-- The Streamlit simulation gives the project a strong demonstration layer for stakeholders.
-- Documentation in `README.md` and `SOTU/` captures the project narrative well.
+## 7. Practical Run Order For Later Use
 
-## 7. Main Gaps and Risks
+If someone needs to resume work later, the right order is:
 
-### A. Critical modeling inputs are still stubbed
+1. Restore or provide the three raw SF CSV files expected by `main.py`.
+2. Run the data loaders to regenerate the building and residential GeoJSON artifacts.
+3. Run hub siting and walk-zone scoring to confirm the canonical hubs or refresh them.
+4. Run corridor pruning to regenerate the top-20 shortlist.
+5. Run hub sizing on that shortlist.
+6. Launch the Streamlit simulation to inspect craning and pad utilisation behavior.
 
-This is the single biggest limitation.
+Useful commands:
 
-Current placeholders include:
+```bash
+python3 main.py --skip-street-network
+```
 
-- per-route obstacle height in `corridor_pruning/corridors.py`
-- OSMnx-based routing in `corridor_pruning/ground_model.py`
-- traffic multiplier in `corridor_pruning/ground_model.py`
-- NHPP demand in `hub_sizing/demand.py`
-- measured service-time distributions in `hub_sizing/service.py`
+```bash
+./.venv/bin/python -c "from corridor_pruning.pruning import prune_corridors; prune_corridors()"
+```
 
-Consequence:
+```bash
+./.venv/bin/python -c "from corridor_pruning.pruning import prune_corridors; from hub_sizing.sizing import size_hubs; size_hubs(prune_corridors())"
+```
 
-- the ranking is directionally useful, but not presentation-grade as a final operational recommendation
+```bash
+./.venv/bin/streamlit run simulation/app.py
+```
 
-### B. Raw input CSVs are not present in the checkout
+If `uv` is available in a future environment, the documented `uv run ...` equivalents are fine.
 
-The repo currently does not contain the three CSV files that `main.py` and the README expect. That means the original siting pipeline is not reproducible from this checkout alone.
+## 8. What Is Stubbed Or Missing
 
-Consequence:
+These are still the main accuracy blockers:
 
-- the code structure is ready, but full data regeneration cannot be demonstrated without external files
+1. Per-route obstacle height
+   - corridors still use fallback cruise altitude instead of intersecting flight paths with building footprints
 
-### C. Dependency metadata is incomplete
+2. Real OSMnx path routing
+   - the graph loader exists, but `ground_model.py` does not yet use live shortest paths
 
-Both `siting_strategy/walk_zones.py` and `siting_strategy/optimization.py` import `scipy.spatial.distance.cdist`, but `pyproject.toml` does not declare `scipy`.
+3. Time-of-day traffic multiplier
+   - currently fixed at `1.0`, so Friday congestion is not really modeled
 
-Consequence:
+4. Real NHPP demand
+   - demand is still a flat peak-rate approximation, not a time-varying fitted process
 
-- a fresh install from project metadata may fail even though the current venv works
+5. Real service-time measurements
+   - kiosk service mean and variance are assumed, not measured
 
-### D. Documentation has one material count mismatch
+6. Rebalancing integration
+   - rebalancing logic exists separately but is not active in the live simulation
 
-The README says there are 144 possible hub pairings, but the implemented corridor generator correctly creates 132 directed non-self pairs.
-
-Consequence:
-
-- small documentation mismatch, but it can confuse presentations or review discussions
-
-### E. Rebalancing exists but is not integrated
-
-`simulation/rebalancing.py` is present as an untracked file and does not appear connected to `simulation/app.py`, `simulation/registry.py`, or package exports.
-
-Consequence:
-
-- the repo has a promising Phase 2 direction, but it is not yet part of the official runnable path
-
-## 8. Current Project Maturity
-
-Best description:
-
-- not a finished production model
-- not just a class notebook anymore
-- currently a strong prototype research codebase with live demonstrator value
-
-Maturity by layer:
-
-- spatial preprocessing: good
-- hub siting: good
-- corridor ranking: medium, pending real-world calibration
-- capacity sizing: medium-good, pending real-world calibration
-- simulation UI: promising demo
-- operational realism: still in progress
+7. Dependency metadata
+   - `siting_strategy/walk_zones.py` and `optimization.py` import `scipy`, but `pyproject.toml` does not list `scipy`
 
 ## 9. Recommended Next Steps
 
-Priority order based on project leverage:
+Highest leverage next actions:
 
-1. Implement per-corridor obstacle-height lookup from building footprints.
-2. Wire real OSMnx routing into `ground_model.py`.
-3. Add a real or defensible traffic multiplier for Friday evening conditions.
-4. Add `scipy` to project dependencies.
-5. Decide whether the 12 hard-coded hubs should remain canonical or be regenerated from raw data on demand.
-6. Integrate `simulation/rebalancing.py` into the live simulation if rebalancing is now part of scope.
-7. Add a small smoke-test suite for pruning, sizing, and simulation imports.
-8. Clean the docs so implementation details and README numbers match exactly.
+1. Implement obstacle-height lookup per corridor from the buildings GeoJSON.
+2. Wire OSMnx route timing into `ground_model.py`.
+3. Add a real Friday traffic multiplier.
+4. Replace flat demand with hub-level NHPP buckets.
+5. Measure service-time mean and variance on a prototype workflow.
+6. Decide whether the hard-coded 12 hubs stay canonical or should be regenerated automatically.
+7. Integrate `simulation/rebalancing.py` if finite-fleet balancing is now in scope.
+8. Add `scipy` to `pyproject.toml`.
 
-## 10. Final Judgement
+## 10. Bottom Line
 
-Sky Burrito is a well-framed urban drone logistics prototype with a clear analytical spine and enough executable code to demonstrate real progress. The project is already valuable as a systems-design artifact, a modeling portfolio piece, and a stakeholder demo. Its current weakness is not lack of architecture; it is lack of calibrated inputs.
+Sky Burrito is currently a strong prototype research codebase with a credible analytical spine:
 
-If the next round of work focuses on replacing stubs with measured or route-specific data, this project can move from "interesting concept with a convincing prototype" to "defensible corridor and infrastructure recommendation engine."
+`spatial data -> hub siting -> corridor ranking -> queue-based hub sizing -> live dispatch simulation`
 
+<<<<<<< HEAD
 ## 11. Key Evidence References
 
 - Project framing and expected data inputs: `README.md`
@@ -589,3 +589,6 @@ If the next round of work focuses on replacing stubs with measured or route-spec
 - Live simulation prototype: `simulation/app.py`
 - Rebalancing extension: `simulation/rebalancing.py`
 >>>>>>> 543e44e (summary report added)
+=======
+The architecture is already good. The limiting factor is no longer structure; it is calibration. Once the stubbed obstacle, traffic, demand, and service inputs are replaced with measured or route-specific data, this project can move from a convincing prototype to a much more defensible operational planning tool.
+>>>>>>> 784e2b7 (final report added)
