@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from simulation.rl_fleet_env import DroneFleetEnv, ACTIVE_HUBS
+from simulation.rl_fleet_env import ACTIVE_HUBS, DroneFleetEnv
 
 
 def test_single_hub_env():
@@ -38,9 +38,6 @@ def test_single_hub_env():
 def test_multi_hub_env():
     """Test multi-hub environment."""
     print("\n=== Testing Multi-Hub Environment ===")
-    
-    # Patch ACTIVE_HUBS temporarily to test multi-hub
-    original_hubs = ACTIVE_HUBS.copy()
     
     # Create env with multi-hub setup
     env = DroneFleetEnv(fleet_size=20, episode_length_hours=24.0, sim_speedup=10.0)

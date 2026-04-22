@@ -1,251 +1,138 @@
-# 🌯 Sky Burrito — SF Inter-District Drone Delivery Network
+# Sky Burrito
 
-> **Status:** ✅ Phase 1 + Phase 2 Complete (April 2026)  
-> **Latest:** CO₂ Integration (April 16, 2026)
+Sky Burrito is a data-driven prototype for a hub-to-hub drone delivery network in San Francisco's Mission–Noe Valley corridor. The repo now has a stable top-level CLI, a persisted simulation setup pipeline, a live Streamlit digital twin, and a PPO-based fleet rebalancing stack for the active 9-hub network.
 
-A data-driven proof-of-concept for a hub-to-hub aerial logistics network in San Francisco's Mission–Noe Valley corridor. The core thesis: drones beat ground couriers in a city shaped by steep grades and chronic gridlock — but only on the *right* routes, for the *right* orders, at the *right* time.
+## What the Project Does
 
-**Key Result**: 20 viable corridors identified with drones **279.8× cheaper** than Uber ground delivery, **99.1% lower CO₂ emissions**, and **6-8 minutes faster** per delivery.
+The project models one narrow thesis: drones are only operationally interesting on corridors where straight-line flight meaningfully beats real ground delivery friction. The pipeline therefore moves through four stages:
 
----
+1. Raw city-data ingest and hub siting
+2. Corridor pruning and ranking
+3. Hub sizing with M/G/k queueing
+4. Live simulation with finite fleet dynamics and optional PPO rebalancing
 
-## The Problem
+The repo is core-first and code-first now; the notebooks are historical references, not the main entrypoint.
 
-San Francisco's street grid was not designed for speed. Steep topography forces cars onto circuitous routes; a 1.2-mile straight-line trip across Dolores Park can translate to a 2.4-mile drive with turns, stoplights, and hills. The resulting "Topographical Arbitrage" — the gap between as-the-crow-flies distance and actual driving distance — is the economic foundation of this project.
+## Repo Shape
 
-Sky Burrito doesn't aim to replace every delivery. It targets the high-value corridors where that arbitrage is large enough to justify the infrastructure.
+- `main.py` is the stable CLI façade.
+- `cli/` holds parser and command implementations.
+- `corridor_pruning/` scores hub-to-hub corridors on time, cost, energy, and CO2.
+- `hub_sizing/` converts shortlisted demand into pad and battery-bay requirements.
+- `simulation/` contains the persisted setup model, runtime builders, finite fleet, dispatcher, registry, RL environment, RL bridge, and Streamlit app.
+- `settings/` holds tunables and paths.
+- `testing/` contains regression and refactor-seam tests.
 
----
+Within `simulation/`, the recent refactor split the core responsibilities:
 
-## Geographic Scope
+- `environment.py` is a compatibility façade.
+- `setup_models.py`, `setup_builders.py`, and `setup_io.py` separate dataclasses, assembly, and persistence.
+- `app_support/` separates Streamlit runtime/state helpers from rendering helpers.
+- `rl_schema.py` holds the shared 42D observation contract used by both the training env and the live RL bridge.
+- `allocation.py` provides the shared largest-remainder integer allocator used by fleet seeding and deterministic rebalancing.
 
-All analysis is locked to a single bounding box in central San Francisco:
+## Current Runtime Model
 
-| Boundary | Location |
-|---|---|
-| **West** | Twin Peaks / Noe Valley edge |
-| **East** | Potrero Hill / Mission edge |
-| **North** | ~Market St / Van Ness Ave |
-| **South** | Cesar Chavez St |
+### Corridor pruning
 
-```
-MIN_LON = -122.4450   MAX_LON = -122.4080
-MIN_LAT =  37.7480    MAX_LAT =  37.7680
-```
+The pruning stage evaluates all directed hub pairs and keeps the top-ranked corridors that clear minimum time and demand thresholds. It currently uses:
 
----
+- Real building obstacle heights when `data/Building_Footprints_*.csv` is available
+- Physics-based drone energy and cost estimates
+- Uber-style ground delivery economics
+- CO2 savings in the composite score
 
-## Architecture: The Hub-to-Kiosk Model
+Still-real limitation:
 
-The network follows a **kiosk-to-kiosk** delivery model — no backyard landings, no rooftop-to-doorstep handoffs. Every flight begins and ends at a secured public kiosk within a 5-minute walk (~420 m) of the end user.
+- The ground model is still stubbed for road routing and traffic. OSMnx wiring is not complete yet, so `used_stubs` remains meaningful.
 
-```
-[Restaurant] → [Launch Hub] ──(drone)──▶ [Drop Kiosk] → [Customer walks ≤5 min]
-```
+### Simulation
 
-Twelve candidate Launch Hubs are sited using a **bimodal K-Means strategy**:
-- **Source Hubs** cluster around high restaurant density (e.g., Hubs 5 and 12)
-- **Sink Hubs** cluster around high residential unit counts (e.g., Hubs 6 and 10)
+The live simulator models:
 
----
+- Finite physical drones
+- Per-hub idle pools and queued orders
+- Drone state machine: `TAKEOFF -> CRUISE -> LANDING -> COOLDOWN`, with `CRANING` when destination pads are full
+- NHPP demand with meal-time shaping
+- Hub pad occupancy and saturation metrics
+- Cross-hub fallback when an origin hub is empty but another viable origin can serve the same destination
 
-## Data Sources
+### RL
 
-Three public City of San Francisco datasets power the spatial analysis:
+The PPO stack is active in two places:
 
-### 1. Registered Business Locations (`Registered_Business_Locations_-_San_Francisco_20260410.csv`)
-Active food-service businesses (NAICS code `722*`) within the bounding box. Filtered to exclude any with a `Business End Date`, `Location End Date`, or `Administratively Closed` flag.
+- `simulation/rl_fleet_env.py` for training and offline evaluation
+- `simulation/rl_bridge.py` for the live Streamlit app
 
-**Result:** 927 active restaurant-class businesses → candidate supply points for Launch Hubs.
+The live app already wires the RL bridge into the registry. Rebalancing still uses inventory-style instant repositioning inside `FleetPool`; payload flights remain the only visible flights on the map.
 
-### 2. Building Footprints (`Building_Footprints_20260410.csv`)
-3D polygon footprints of every structure over 2 meters tall, with `hgt_median_m`. Used to compute the per-route **Climb Cost**: the minimum cruising altitude a drone must reach to safely clear all obstacles on a given flight path.
+## Data Inputs
 
-**Result:** 15,559 building obstacles mapped in the corridor.
+Place the raw CSVs under `data/`:
 
-### 3. SF Land Use — 2023 (`San_Francisco_Land_Use_-_2023_20260410.csv`)
-Residential parcel centroids with `resunits` counts. Used to score potential Kiosk sites by "Residential Gravity" — the number of dwelling units within a 420-meter walk zone.
+- `Registered_Business_Locations_-_San_Francisco_20260410.csv`
+- `Building_Footprints_20260410.csv`
+- `San_Francisco_Land_Use_-_2023_20260410.csv`
 
-**Result:** 13,043 residential properties tracked as demand sinks.
-
----
-
-## Notebooks
-
-### `group_project.ipynb` — Core Data Pipeline
-
-The foundational preprocessing notebook. Runs in order:
-
-1. **Bounding box definition** — establishes the corridor in lat/lon
-2. **Restaurant ingestion** — loads, filters, and converts the business registry to a GeoDataFrame
-3. **Building obstacle ingestion** — loads footprints, filters by height threshold, exports `mission_noe_buildings.geojson`
-4. **Residential sink ingestion** — loads land use, converts polygons to centroids, exports `mission_noe_residential_sinks.geojson`
-5. **OSMnx street graph** — downloads the drivable road network for the corridor to serve as the ground-transit benchmark in arbitrage calculations
-
-### `group_project_visuilzation.ipynb` — Spatial Analysis & Hub Optimization
-
-Builds on the core pipeline and adds:
-
-- **Density maps** — separate and overlaid restaurant vs. residential heatmaps
-- **Building height distribution** — informs minimum drone cruising altitude
-- **5-minute walk zone analysis** — 420 m radius buffers around candidate kiosk sites, scored by `resunits` coverage
-- **K-Means cluster sweep** — tests `k = {4, 5, 6, 7, 8, 10, 12}` hub counts to find the coverage/cost sweet spot
-- **Launch pad optimization report** — prints a full infrastructure summary with per-hub coverage metrics
-
----
-
-## Key Mathematical Frameworks
-
-### Topographical Arbitrage (Route Pruning)
-Only routes where `Δt(drone) − Δt(car)` exceeds a threshold are kept. The OSMnx graph provides realistic car travel times; drone time is straight-line distance at cruise speed. Of the 144 possible hub-to-hub pairings (12 × 12), the target is to prune to ~20 high-value corridors.
-
-### Climb Cost (Energy Modeling)
-Battery drain is modeled as a function of horizontal distance plus vertical lift:
-
-```
-E_total = E_horizontal + E_climb
-E_climb = m × g × h_obstacle_clearance
-```
-
-The building footprints dataset supplies `h_obstacle_clearance` per route. This lets the model compare drone energy cost against the fuel/time waste of a car idling in traffic.
-
-### M/G/k Queuing (Infrastructure Sizing)
-Demand is simulated using a **Non-Homogeneous Poisson Process** to model Friday-night order volume surges. The M/G/k queuing model then solves for `k` (landing pads + battery bays per hub) to prevent "craning" — drones idling in the air waiting for a pad to open.
-
----
+Committed GeoJSON files in the repo root are derived artifacts.
 
 ## Setup
 
 ```bash
-uv sync
+uv sync --dev
 ```
 
-Create a `data/` directory in the project root and place the three raw CSV files there
-(they are not committed to the repo due to size):
+If you already have the project environment synced, the key verification commands are:
 
-- `data/Registered_Business_Locations_-_San_Francisco_20260410.csv`
-- `data/Building_Footprints_20260410.csv`
-- `data/San_Francisco_Land_Use_-_2023_20260410.csv`
-
-The committed GeoJSON files in the repo root are derived artifacts. The raw-data
-entrypoint is now `main.py`, not the old notebook-first flow.
-
----
-
-## Implementation Phases
-
-### ✅ Phase 1: Uber-Style Driver Economics (Complete)
-- **Files:** `corridor_pruning/driver_economics.py`, `corridor_pruning/ground_model.py`
-- **What:** Real ground delivery costs based on Uber's pricing model
-- **Data:** Time ($0.35/min) + Distance ($1.25/mi) + Surge (0.8-1.5× by hour)
-- **Result:** Cost arbitrage identified ($7.34 saved per delivery at peak hour)
-- **Status:** ✅ Implemented, tested, integrated into ranking
-
-### ✅ Phase 2: Environmental & Physics-Based Analysis (Complete)
-- **Files:** `carbon_footprint.py`, `obstacles.py`, `drone_model.py` (enhanced)
-- **Sub-Phase 2a: Carbon Footprint** (Complete)
-  - Grid CO₂: 0.495 kg/kWh (California 2026 renewable mix)
-  - Fuel CO₂: 8.887 kg/gallon (EPA combustion chemistry)
-  - Result: 99.1% CO₂ reduction per delivery
-  - Status: ✅ Calculated and integrated into scoring (20% weight)
-  
-- **Sub-Phase 2b: Building Obstacles** (Complete)
-  - Data: SF Open Data (15,000 buildings, 185 MB CSV)
-  - Features: Real altitude calculations with 50m safety buffer
-  - Status: ✅ Module created, ready to wire into corridor altitude
-  
-- **Sub-Phase 2c: Energy Decomposition** (Complete)
-  - Climb energy: 19% of total
-  - Cruise energy: 32% of total
-  - Descend energy: 3% of total (gravity-assisted)
-  - Cost breakdown: Battery ($0.12/kWh) + Maintenance ($0.30/mi)
-  - Status: ✅ Calculated per corridor
-
-### ✅ Phase 2 Integration: CO₂ in Composite Scoring (Complete)
-- **File:** `corridor_pruning/pruning.py`
-- **What:** CO₂ reduction now weighted 20% in corridor ranking
-- **Scoring:** 60% cost + 20% time + 20% CO₂
-- **Status:** ✅ All 20 corridors ranked with CO₂ metrics
-- **Verification:** CO2_INTEGRATION_STATUS.md
-
----
+```bash
+uv run pytest -q testing
+uv run ruff check .
+```
 
 ## Entrypoints
 
-`main.py` is the top-level CLI for the repo. These are the supported entrypoints:
-
 ```bash
-# 1. Raw-data ingest, hub siting, walk-zone scoring, chart generation
-uv run python main.py siting
-
-# Backwards-compatible form: still runs the siting pipeline
-uv run python main.py --hubs 8 --skip-street-network
-
-# 2. Corridor pruning and ranked top-route report
-uv run python main.py corridors --top-n 20 --sim-hour 19
-
-# 3. Corridor pruning + M/G/k hub sizing report
-uv run python main.py sizing --top-n 10 --sim-hour 19
-
-# 4. Streamlit digital twin / live simulation
-uv run python main.py simulate
-```
-
-## Quick Start
-
-```bash
-# Run the siting pipeline end-to-end
+# 1. Run siting and chart generation
 uv run python main.py siting --skip-street-network
 
-# Print the top shortlisted corridors
-uv run python main.py corridors
+# Backward-compatible root invocation
+uv run python main.py --hubs 8 --skip-street-network
 
-# Print the hub sizing report
-uv run python main.py sizing
+# 2. Print the current corridor shortlist
+uv run python main.py corridors --top-n 20 --sim-hour 19
 
-# Launch the live simulation
+# 3. Build and persist the simulation setup
+uv run python main.py sizing --top-n 10 --fleet-size 30
+
+# 4. Launch the Streamlit digital twin
 uv run python main.py simulate
 ```
 
----
+You can still launch the app directly:
 
-## Roadmap
+```bash
+uv run streamlit run simulation/app.py
+```
 
-| Priority | Task | Status |
-|---|---|---|
-| ✅ **COMPLETE** | Corridor Pruning | 132 corridors scored, top 20 ranked |
-| ✅ **COMPLETE** | Economic Analysis | Uber-style driver cost model |
-| ✅ **COMPLETE** | Energy Analysis | Climb/cruise/descend phases calculated |
-| ✅ **COMPLETE** | CO₂ Analysis | Carbon footprint + grid mix integration |
-| ✅ **COMPLETE** | Infrastructure Sizing | M/G/k model for pad requirements |
-| ⏳ **OPTIONAL** | Street Routing | OSMnx integration (framework ready) |
-| ⏳ **OPTIONAL** | Real-Time Traffic | Traffic multiplier by time-of-day |
-| ⏳ **OPTIONAL** | Simulation | Live dispatch simulator (in progress) |
+## Verification Status
 
----
+The refactored core stack is currently verified with:
 
-## Project Status
+- `python -m compileall` over `cli/`, `simulation/`, `testing/`, and `main.py`
+- `pytest` across the full `testing/` suite
+- `ruff check` across `cli`, `simulation`, `testing`, and `main.py`
 
-✅ **Phase 1 & Phase 2 Complete**
+Recent regression coverage now includes:
 
-- ✅ 12 hub locations mathematically optimized (K-Means clustering)
-- ✅ 132 inter-hub corridors evaluated
-- ✅ Economic model: Uber-style driver pricing with surge multipliers
-- ✅ Environmental model: Grid CO₂ + fuel combustion + idle burn
-- ✅ Physics model: Climb/cruise/descend energy decomposition
-- ✅ Real data: SF building heights (15,000 obstacles, LIDAR)
-- ✅ Scoring: 60% cost + 20% time + 20% CO₂ reduction
-- ✅ Results: Top 20 corridors ranked by composite viability
-- ✅ Testing: All code tested, 100% integration verification
-- ✅ Documentation: Comprehensive (11 markdown files, this one included)
+- CLI backward compatibility
+- Setup save/load roundtrip
+- Shared allocation behavior
+- Shared RL observation contract
+- Registry fallback and queue-drain behavior
 
-**Current Deployment:**
-- Simulator running at `http://localhost:8501` (Streamlit)
-- Core analysis at `prune_corridors()` function
-- All systems operational ✅
+## Known Gaps
 
-**Next Phase (Optional Enhancements):**
-- Real-time traffic integration (Google Maps API)
-- Weather impact modeling
-- Multi-drone batching economics
-- Regulatory compliance reporting
+- Ground routing still uses a stub model instead of full OSMnx travel times
+- `corridor_pruning.pruning` still reports stub usage until the ground model is replaced
+- The live RL bridge uses instant pool rebalancing rather than visible dead-head drone flights
+- Some long-form summary markdown files are historical and were intentionally left untouched in this refactor pass

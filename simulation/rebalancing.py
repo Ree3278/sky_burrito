@@ -16,8 +16,9 @@ This is intentionally simple and deterministic:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import floor
-from typing import Dict, Iterable, List, Mapping, Tuple
+from typing import Dict, List, Mapping
+
+from simulation.allocation import allocate_proportional_integers
 
 
 def allocate_targets_from_weights(
@@ -31,49 +32,11 @@ def allocate_targets_from_weights(
 
     Uses largest-remainder rounding after first assigning min_per_hub to each hub.
     """
-    if total_units < 0:
-        raise ValueError("total_units must be non-negative")
-    if min_per_hub < 0:
-        raise ValueError("min_per_hub must be non-negative")
-    if not weights:
-        raise ValueError("weights cannot be empty")
-
-    hub_ids = list(weights.keys())
-    if total_units < min_per_hub * len(hub_ids):
-        raise ValueError(
-            f"total_units={total_units} is too small for min_per_hub={min_per_hub} "
-            f"across {len(hub_ids)} hubs"
-        )
-
-    # Base allocation (minimum presence)
-    targets: Dict[int, int] = {hid: min_per_hub for hid in hub_ids}
-    remaining = total_units - min_per_hub * len(hub_ids)
-    if remaining == 0:
-        return targets
-
-    total_weight = sum(float(w) for w in weights.values())
-    if total_weight <= 0:
-        raise ValueError("weights must sum to a positive value")
-
-    exact = {hid: (float(weights[hid]) / total_weight) * remaining for hid in hub_ids}
-    base = {hid: floor(exact[hid]) for hid in hub_ids}
-    remainder = remaining - sum(base.values())
-
-    ranked = sorted(
-        hub_ids,
-        key=lambda hid: (exact[hid] - base[hid], float(weights[hid]), -hid),
-        reverse=True,
+    return allocate_proportional_integers(
+        weights,
+        total_units,
+        min_per_key=min_per_hub,
     )
-    for hid in ranked[:remainder]:
-        base[hid] += 1
-
-    for hid in hub_ids:
-        targets[hid] += base[hid]
-
-    # Final sanity check
-    if sum(targets.values()) != total_units:
-        raise AssertionError("target allocation did not sum to total_units")
-    return targets
 
 
 @dataclass(frozen=True)
@@ -166,4 +129,3 @@ __all__ = [
     "DemandRebalancer",
     "RebalanceMove",
 ]
-

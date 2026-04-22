@@ -5,18 +5,15 @@ Uses PPO (Proximal Policy Optimization) with Stable-Baselines3
 Implements 4-phase curriculum learning for drone fleet management
 """
 
-import os
-import sys
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.utils import FloatSchedule
-from stable_baselines3.common.vec_env import DummyVecEnv
-import tensorboard
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -149,7 +146,7 @@ def train_fleet_size(
     # Create environment
     print(f"Creating environment for fleet size: {fleet_size} drones...")
     env = create_environment(fleet_size, phase, curriculum)
-    print(f"✓ Environment created")
+    print("✓ Environment created")
     print(f"  Observation space: {env.observation_space.shape}")
     print(f"  Action space:      {env.action_space.shape}")
     print(f"  Episode length:    {cfg['episode_length']} steps")
@@ -180,7 +177,7 @@ def train_fleet_size(
     model_name = f"ppo_fleet_{fleet_size}_phase_{phase}"
     model_path = checkpoint_path / model_name
     
-    print(f"\nInitializing PPO agent...")
+    print("\nInitializing PPO agent...")
     print(f"  Checkpoint path:   {checkpoint_path}")
     print(f"  Logs path:         {logs_path}")
     print(f"  Learning rate:     {learning_rate:.2e}")
@@ -223,10 +220,10 @@ def train_fleet_size(
     )
     
     # Train the model
-    print(f"\nStarting training...")
+    print("\nStarting training...")
     print(f"  Total timesteps: {total_timesteps:,}")
     print(f"  Expected time:   {total_timesteps / 50_000:.1f}x Phase 1 duration")
-    print(f"\nOpen TensorBoard with:")
+    print("\nOpen TensorBoard with:")
     print(f"  tensorboard --logdir {logs_path.parent}")
     
     try:
@@ -244,7 +241,7 @@ def train_fleet_size(
     print(f"\n✓ Model saved to {model_path}.zip")
     
     # Test the trained model
-    print(f"\nTesting trained model...")
+    print("\nTesting trained model...")
     test_reward = evaluate_model(model, env, num_episodes=3)
     print(f"✓ Average test reward: {test_reward:.2f}")
     
@@ -344,11 +341,11 @@ def main():
     print(f"{'='*70}")
     print("\nNext steps:")
     print("1. Monitor training with TensorBoard:")
-    print(f"   tensorboard --logdir logs")
+    print("   tensorboard --logdir logs")
     print("\n2. Evaluate models:")
     print(f"   python simulation/rl_inference.py --fleet-size 20 --phase {args.phase}")
     print("\n3. Deploy to simulation:")
-    print(f"   python simulation/app.py --use-rl --fleet-size 20")
+    print("   python simulation/app.py --use-rl --fleet-size 20")
 
 
 if __name__ == "__main__":

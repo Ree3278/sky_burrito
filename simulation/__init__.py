@@ -1,6 +1,6 @@
 from .clock import SimClock
+from .dispatcher import Dispatcher, DispatchRequest
 from .drone import Drone, DroneState
-from .dispatcher import DispatchRequest, Dispatcher
 from .fleet import FleetPool, FleetSnapshot
 from .registry import DroneRegistry, SimSnapshot
 

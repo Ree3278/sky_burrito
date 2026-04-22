@@ -27,18 +27,24 @@ Usage
 from __future__ import annotations
 
 import math
-import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Tuple
 
 if TYPE_CHECKING:
     from corridor_pruning.corridors import Corridor
 
 from .config import (
-    CRUISE_SPEED_MS, CLIMB_SPEED_MS, DESCENT_SPEED_MS, ASSUMED_ALTITUDE_M,
-    COLOR_IDLE, COLOR_TAKEOFF, COLOR_CRUISE,
-    COLOR_LANDING, COLOR_COOLDOWN, COLOR_CRANING,
+    ASSUMED_ALTITUDE_M,
+    CLIMB_SPEED_MS,
+    COLOR_COOLDOWN,
+    COLOR_CRANING,
+    COLOR_CRUISE,
+    COLOR_IDLE,
+    COLOR_LANDING,
+    COLOR_TAKEOFF,
+    CRUISE_SPEED_MS,
+    DESCENT_SPEED_MS,
 )
 
 

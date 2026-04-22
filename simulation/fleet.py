@@ -19,11 +19,11 @@ Design goals
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import floor
-from typing import Dict, Iterable, List, Mapping, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, Iterable, List, Mapping
 
 from corridor_pruning.hubs import HUB_LOOKUP
 from settings.simulation import DEFAULT_FLEET_SIZE
+from simulation.allocation import allocate_proportional_integers
 
 if TYPE_CHECKING:
     from hub_sizing.sizing import HubSizingResult
@@ -112,7 +112,7 @@ class FleetPool:
             missing = sorted(set(active_hub_ids) - set(weights))
             raise KeyError(f"Missing hub metadata for hub ids: {missing}")
 
-        initial_idle_by_hub = _allocate_largest_remainder(weights, total_fleet_size)
+        initial_idle_by_hub = allocate_proportional_integers(weights, total_fleet_size)
         return cls(initial_idle_by_hub=initial_idle_by_hub)
 
     @property
@@ -218,46 +218,6 @@ class FleetPool:
         bad = {hub_id: count for hub_id, count in values.items() if count < 0}
         if bad:
             raise ValueError(f"{label} cannot be negative: {bad}")
-
-
-def _allocate_largest_remainder(
-    weights: Mapping[int, float],
-    total_units: int,
-) -> Dict[int, int]:
-    """
-    Allocate an exact integer total proportionally using largest remainders.
-
-    Example:
-        weights = {1: 2.0, 2: 1.0}, total_units = 5
-        -> {1: 3, 2: 2}
-    """
-    if not weights:
-        raise ValueError("weights cannot be empty")
-    if total_units < 0:
-        raise ValueError("total_units must be non-negative")
-
-    total_weight = sum(weights.values())
-    if total_weight <= 0:
-        raise ValueError("weights must sum to a positive value")
-
-    exact = {
-        hub_id: (weight / total_weight) * total_units
-        for hub_id, weight in weights.items()
-    }
-    base = {hub_id: floor(value) for hub_id, value in exact.items()}
-    remainder = total_units - sum(base.values())
-
-    ranked = sorted(
-        weights,
-        key=lambda hub_id: (exact[hub_id] - base[hub_id], weights[hub_id], -hub_id),
-        reverse=True,
-    )
-    for hub_id in ranked[:remainder]:
-        base[hub_id] += 1
-
-    return base
-
-
 __all__ = [
     "DEFAULT_FLEET_SIZE",
     "FleetPool",

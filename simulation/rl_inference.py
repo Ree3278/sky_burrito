@@ -4,9 +4,10 @@ RL Fleet Optimization Inference Script
 Load trained models and evaluate performance
 """
 
+import argparse
 import sys
 from pathlib import Path
-import argparse
+
 import numpy as np
 from stable_baselines3 import PPO
 

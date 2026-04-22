@@ -13,15 +13,15 @@ Author: GitHub Copilot + Ryan Lin
 Date: April 17, 2026
 """
 
+import math
+import os
+import sys
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from typing import Tuple, Dict, List, Optional
-from dataclasses import dataclass
-from enum import Enum
-import math
-import sys
-import os
 
 # Add project root to path for cross-package imports
 _PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
@@ -29,13 +29,11 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, 'hub_sizing'))
 sys.path.insert(0, _PROJECT_ROOT)
 
 from hub_sizing.demand import hub_profiles_from_setup_hubs
-from hub_sizing.mgk import solve_k, MGKResult
-from rebalancing.ghost_logic import GhostHeuristic, GhostConfig, GhostMove
-from simulation.environment import SimulationSetup, load_or_build_simulation_setup
+from hub_sizing.mgk import solve_k
+from rebalancing.ghost_logic import GhostConfig, GhostHeuristic, GhostMove
 from settings.rl import (
     ACTION_MAX,
     ACTION_MIN,
-    CONTINUOUS_REBALANCING,
     CRANING_PENALTY,
     DEADHEAD_BATTERY_REQUIRED,
     DEADHEAD_PENALTY,
@@ -46,24 +44,29 @@ from settings.rl import (
     GHOST_HEARTBEAT_MINUTES,
     IDLE_BONUS_SCALE,
     IDLE_BONUS_THRESHOLD,
-    MEAL_MULTIPLIERS as RL_MEAL_MULTIPLIERS,
     MGK_MEAN_SERVICE_MIN,
     MGK_P_CRAN_TARGET,
     MGK_UTIL_CAP,
-    QUEUE_OBSERVATION_CAP,
     QUEUE_PENALTY_CAP_MULTIPLIER,
     QUEUE_PENALTY_PER_ORDER,
-    REBALANCE_ENABLED_HOURS,
     REWARD_NORMALIZATION,
     STARVED_HUB_PENALTY,
     STARVED_HUB_QUEUE_THRESHOLD,
-    TIME_ENCODING_PERIOD_HOURS,
 )
-
+from settings.rl import (
+    ACTIVE_HUBS as RL_ACTIVE_HUBS,
+)
+from settings.rl import (
+    MEAL_MULTIPLIERS as RL_MEAL_MULTIPLIERS,
+)
+from simulation.environment import SimulationSetup, load_or_build_simulation_setup
+from simulation.rl_schema import ACTIVE_HUB_IDS, build_observation, meal_time_features
 
 # ============================================================================
 # Constants & Configuration
 # ============================================================================
+
+ACTIVE_HUBS = list(RL_ACTIVE_HUBS)
 
 
 # ============================================================================
@@ -182,7 +185,7 @@ class DemandGenerator:
                 p_cran_target=MGK_P_CRAN_TARGET,
                 util_cap=MGK_UTIL_CAP,
             )
-        except Exception as e:
+        except Exception:
             # Fallback if MGk fails
             mgk_result = None
         
@@ -201,18 +204,7 @@ class DemandGenerator:
         Returns 4-element vector: [breakfast, lunch, snack, dinner]
         Each value in [0, 1] indicating intensity of that meal time.
         """
-        features = np.zeros(4)
-        
-        if 7 <= hour < 9:
-            features[0] = max(0, 1.0 - abs(hour - 8) / 1.0)  # peaks at 8 AM
-        if 11.5 <= hour < 13.5:
-            features[1] = max(0, 1.0 - abs(hour - 12.5) / 1.0)  # peaks at 12:30 PM
-        if 15 <= hour < 17:
-            features[2] = max(0, 1.0 - abs(hour - 16) / 1.0)  # peaks at 4 PM
-        if 18 <= hour < 20:
-            features[3] = max(0, 1.0 - abs(hour - 19) / 1.0)  # peaks at 7 PM
-        
-        return features
+        return meal_time_features(hour)
 
 
 # ============================================================================
@@ -810,33 +802,30 @@ class DroneFleetEnv(gym.Env):
         [40:42] - Time sin/cos
         """
         
-        obs = np.zeros(42, dtype=np.float32)
-        
-        # Fleet per hub (normalized by fleet size)
-        obs[0:self.num_hubs] = self.fleet_state.idle_per_hub / self.fleet_size
-        
-        # Queue per hub (normalized, assume max 50 orders)
-        obs[self.num_hubs:2*self.num_hubs] = np.clip(
-            self.order_queues / QUEUE_OBSERVATION_CAP,
-            0,
-            1,
+        idle_by_hub = {
+            hub_id: float(self.fleet_state.idle_per_hub[idx])
+            for idx, hub_id in enumerate(ACTIVE_HUB_IDS)
+        }
+        queue_by_hub = {
+            hub_id: float(self.order_queues[idx])
+            for idx, hub_id in enumerate(ACTIVE_HUB_IDS)
+        }
+        utilisation_by_hub = {
+            hub_id: float(self.fleet_state.utilization_per_hub[idx])
+            for idx, hub_id in enumerate(ACTIVE_HUB_IDS)
+        }
+        battery_by_hub = {
+            hub_id: float(self.fleet_state.battery_per_hub[idx])
+            for idx, hub_id in enumerate(ACTIVE_HUB_IDS)
+        }
+        return build_observation(
+            idle_by_hub=idle_by_hub,
+            queue_by_hub=queue_by_hub,
+            utilisation_by_hub=utilisation_by_hub,
+            battery_by_hub=battery_by_hub,
+            fleet_size=self.fleet_size,
+            sim_hour=self.current_hour,
         )
-        
-        # Utilization per hub
-        obs[2*self.num_hubs:3*self.num_hubs] = self.fleet_state.utilization_per_hub
-        
-        # Meal-time features
-        meal_features = DemandGenerator.get_meal_time_features(self.current_hour)
-        obs[27:31] = meal_features
-        
-        # Battery per hub
-        obs[31:31+self.num_hubs] = self.fleet_state.battery_per_hub
-        
-        # Time sin/cos
-        obs[40] = np.sin(2 * np.pi * self.current_hour / TIME_ENCODING_PERIOD_HOURS)
-        obs[41] = np.cos(2 * np.pi * self.current_hour / TIME_ENCODING_PERIOD_HOURS)
-        
-        return obs
     
     def _compute_reward(self) -> float:
         """

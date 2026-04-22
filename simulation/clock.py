@@ -6,8 +6,10 @@ Each call to tick() advances by TICK_REAL_S × TIME_MULTIPLIER simulation second
 """
 
 from __future__ import annotations
+
 import time
-from .config import TIME_MULTIPLIER, TICK_REAL_S, SIM_START_S
+
+from .config import SIM_START_S, TICK_REAL_S, TIME_MULTIPLIER
 
 
 class SimClock:

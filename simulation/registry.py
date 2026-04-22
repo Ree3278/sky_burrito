@@ -1,32 +1,26 @@
-"""
-Drone registry — the single source of truth for the live simulation state.
-
-Responsibilities
-----------------
-- Hold every active Drone object
-- Track pad occupancy per hub (drones in COOLDOWN or LANDING at that hub)
-- Detect and record craning events
-- Advance all drones on each tick
-- Emit per-tick snapshot dicts for Pydeck rendering
-- Collect running metrics (total orders, craning events, busiest hub)
-"""
+"""Central simulation loop and state snapshotting for the live app."""
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Deque, Dict, List, Optional
 
+from simulation.registry_support import (
+    choose_cross_hub_corridor,
+    pad_is_free,
+    recount_hub_metrics,
+)
+from simulation.rl_schema import RL_HEARTBEAT_S
+
+from .dispatcher import Dispatcher, DispatchRequest
 from .drone import Drone, DroneState
-from .dispatcher import DispatchRequest, Dispatcher
 from .fleet import FleetPool, FleetSnapshot
 
 if TYPE_CHECKING:
     from hub_sizing.sizing import HubSizingResult
-    from .rl_bridge import RLBridge
 
-# RL heartbeat: fire once per simulated minute regardless of tick rate.
-_RL_HEARTBEAT_S: float = 60.0
+    from .rl_bridge import RLBridge
 
 
 @dataclass
@@ -52,8 +46,9 @@ class HubMetrics:
 @dataclass
 class SimSnapshot:
     """Everything the Pydeck app needs for a single frame."""
+
     sim_time_hhmm: str
-    drones: List[dict]                    # each drone's to_dict()
+    drones: List[dict]
     hub_metrics: Dict[int, HubMetrics]
     fleet: FleetSnapshot
     total_active_drones: int
@@ -61,22 +56,20 @@ class SimSnapshot:
     total_orders_received: int
     total_orders_dispatched: int
     total_craning_events: int
-    # RL rebalancing stats (0 when RL is disabled)
-    rl_rebalancing_moves:  int = field(default=0)
-    rl_drones_rebalanced:  int = field(default=0)
+    rl_rebalancing_moves: int = field(default=0)
+    rl_drones_rebalanced: int = field(default=0)
+
+
+@dataclass
+class _ObsSnapshot:
+    """Minimal snapshot shape consumed by the RL bridge."""
+
+    fleet: FleetSnapshot
+    hub_metrics: Dict[int, HubMetrics]
 
 
 class DroneRegistry:
-    """
-    Central simulation loop controller.
-
-    Parameters
-    ----------
-    hub_sizing_results : list of HubSizingResult
-        Determines k (pad capacity) per hub.
-    dispatcher : Dispatcher
-        Generates new payload orders each tick.
-    """
+    """Main runtime coordinator for payload creation, movement, and metrics."""
 
     def __init__(
         self,
@@ -86,192 +79,150 @@ class DroneRegistry:
         rl_bridge: "Optional[RLBridge]" = None,
     ):
         self._hub_sizing_results = list(hub_sizing_results)
-        self._drones: Dict[int, Drone] = {}
         self._dispatcher = dispatcher
         self._fleet = fleet_pool or FleetPool.from_hub_sizing(self._hub_sizing_results)
+        self._rl_bridge = rl_bridge
+
+        self._drones: Dict[int, Drone] = {}
         self._pending_orders_by_hub: Dict[int, Deque[DispatchRequest]] = {
             hub_id: deque() for hub_id in self._fleet.active_hub_ids
         }
         self._hub_metrics: Dict[int, HubMetrics] = {
-            r.hub_id: HubMetrics(hub_id=r.hub_id, k_pads=r.k_pads)
-            for r in self._hub_sizing_results
+            result.hub_id: HubMetrics(hub_id=result.hub_id, k_pads=result.k_pads)
+            for result in self._hub_sizing_results
         }
-        # Default pad count for hubs not in sizing results (Hubs 8, 12)
         self._default_k = 2
+        self._rl_accumulator_s = 0.0
+        self._rl_total_moves = 0
+        self._rl_total_drones = 0
         self._total_orders_received = 0
         self._total_orders = 0
         self._total_craning_events = 0
 
-        # ── RL rebalancing bridge ──────────────────────────────────────────
-        self._rl_bridge: "Optional[RLBridge]" = rl_bridge
-        self._rl_accumulator_s: float = 0.0   # time since last RL heartbeat
-        self._rl_total_moves:  int = 0
-        self._rl_total_drones: int = 0
-
-    # ── Tick ─────────────────────────────────────────────────────────────────
-
     def tick(self, dt_sim_s: float, sim_time_hhmm: str) -> SimSnapshot:
-        """
-        Advance the full simulation by dt_sim_s seconds.
-
-        1. Spawn new drones from dispatcher
-        2. Move all existing drones
-        3. Retire drones that have completed their journey
-        4. Recount pad occupancy
-        5. Return snapshot
-        """
-        # 1. Spawn — pass sim_hour so dispatcher can modulate λ by time-of-day.
+        """Advance the live simulation state and return the new snapshot."""
         sim_hour = self._parse_sim_hour(sim_time_hhmm)
-        new_requests = self._dispatcher.tick(dt_sim_s, sim_hour)
-        for request in new_requests:
+        self._spawn_new_requests(dt_sim_s, sim_hour)
+        self._run_rl_if_due(dt_sim_s, sim_hour)
+        self._advance_drones(dt_sim_s)
+        self._retire_completed_drones()
+        self._recount_pads()
+        return self._snapshot(sim_time_hhmm)
+
+    def reset(self) -> None:
+        """Reset the registry back to its initial empty-flight state."""
+        self._drones.clear()
+        self._fleet = FleetPool.from_hub_sizing(
+            self._hub_sizing_results,
+            total_fleet_size=self._fleet.total_fleet_size,
+        )
+        self._pending_orders_by_hub = {
+            hub_id: deque() for hub_id in self._fleet.active_hub_ids
+        }
+        for metrics in self._hub_metrics.values():
+            metrics.pads_in_use = 0
+            metrics.drones_craning = 0
+            metrics.total_landings = 0
+            metrics.total_craning_events = 0
+        self._rl_accumulator_s = 0.0
+        self._rl_total_moves = 0
+        self._rl_total_drones = 0
+        self._total_orders_received = 0
+        self._total_orders = 0
+        self._total_craning_events = 0
+        if self._rl_bridge is not None:
+            self._rl_bridge.reset_episode()
+
+    def _spawn_new_requests(self, dt_sim_s: float, sim_hour: float) -> None:
+        for request in self._dispatcher.tick(dt_sim_s, sim_hour):
             self._handle_order_request(request)
 
-        # 1b. RL rebalancing heartbeat — fires every ~60 simulated seconds.
-        #     Runs after spawning new orders (so the observation reflects fresh
-        #     demand) but before moving drones (so relocated drones can serve
-        #     orders this tick).
-        rl_moves_this_tick  = 0
-        rl_drones_this_tick = 0
-        if self._rl_bridge is not None and self._rl_bridge.is_available:
-            self._rl_accumulator_s += dt_sim_s
-            if self._rl_accumulator_s >= _RL_HEARTBEAT_S:
-                self._rl_accumulator_s = 0.0
-                # sim_hour already computed above for dispatcher
-                # Build a lightweight snapshot for the observation (reuse current fleet)
-                _obs_snap = _ObsSnapshot(
-                    fleet       = self._fleet.snapshot(),
-                    hub_metrics = self._hub_metrics,
-                )
-                result = self._rl_bridge.step(_obs_snap, self._fleet, sim_hour)
-                rl_moves_this_tick  = result.drones_relocated  # count moves by drones moved
-                rl_drones_this_tick = result.drones_relocated
-                self._rl_total_moves  += result.moves_attempted
-                self._rl_total_drones += result.drones_relocated
+    def _run_rl_if_due(self, dt_sim_s: float, sim_hour: float) -> None:
+        if self._rl_bridge is None or not self._rl_bridge.is_available:
+            return
+        self._rl_accumulator_s += dt_sim_s
+        if self._rl_accumulator_s < RL_HEARTBEAT_S:
+            return
 
-        # 2. Move
-        self._recount_pads()   # refresh before checking pad availability
-        for drone in list(self._drones.values()):
-            dest_id = drone.corridor.destination.id
-            pad_free = self._pad_free(dest_id, exclude_drone=drone)
-            prev_state = drone.state
-            drone.move(dt_sim_s, pad_free_at_dest=pad_free)
+        self._rl_accumulator_s = 0.0
+        snapshot = _ObsSnapshot(
+            fleet=self._fleet.snapshot(),
+            hub_metrics=self._hub_metrics,
+        )
+        result = self._rl_bridge.step(snapshot, self._fleet, sim_hour)
+        self._rl_total_moves += result.moves_attempted
+        self._rl_total_drones += result.drones_relocated
 
-            # Track craning events (new transitions INTO craning)
-            if drone.state == DroneState.CRANING and prev_state != DroneState.CRANING:
-                self._total_craning_events += 1
-                m = self._get_hub_metrics(dest_id)
-                m.total_craning_events += 1
-
-        # 3. Retire completed drones
-        done = [(did, d) for did, d in self._drones.items() if d.done]
-        for did, drone in done:
-            dest_hub_id = drone.corridor.destination.id
-            self._fleet.checkin_drone(dest_hub_id)
-            del self._drones[did]
-            self._drain_origin_queue(dest_hub_id)
-
-        # 4. Final recount
+    def _advance_drones(self, dt_sim_s: float) -> None:
         self._recount_pads()
+        for drone in list(self._drones.values()):
+            destination_id = drone.corridor.destination.id
+            pad_free = self._pad_free(destination_id, drone)
+            previous_state = drone.state
+            drone.move(dt_sim_s, pad_free_at_dest=pad_free)
+            if drone.state == DroneState.CRANING and previous_state != DroneState.CRANING:
+                self._total_craning_events += 1
+                self._get_hub_metrics(destination_id).total_craning_events += 1
 
-        # 5. Snapshot
+    def _retire_completed_drones(self) -> None:
+        completed = [(drone_id, drone) for drone_id, drone in self._drones.items() if drone.done]
+        for drone_id, drone in completed:
+            destination_hub_id = drone.corridor.destination.id
+            self._fleet.checkin_drone(destination_hub_id)
+            del self._drones[drone_id]
+            self._drain_origin_queue(destination_hub_id)
+
+    def _snapshot(self, sim_time_hhmm: str) -> SimSnapshot:
         total_craning = sum(
-            1 for d in self._drones.values() if d.state == DroneState.CRANING
+            1 for drone in self._drones.values() if drone.state == DroneState.CRANING
         )
-
         return SimSnapshot(
-            sim_time_hhmm          = sim_time_hhmm,
-            drones                 = [d.to_dict() for d in self._drones.values()],
-            hub_metrics            = dict(self._hub_metrics),
-            fleet                  = self._fleet.snapshot(),
-            total_active_drones    = len(self._drones),
-            total_craning          = total_craning,
-            total_orders_received  = self._total_orders_received,
-            total_orders_dispatched= self._total_orders,
-            total_craning_events   = self._total_craning_events,
-            rl_rebalancing_moves   = self._rl_total_moves,
-            rl_drones_rebalanced   = self._rl_total_drones,
+            sim_time_hhmm=sim_time_hhmm,
+            drones=[drone.to_dict() for drone in self._drones.values()],
+            hub_metrics=dict(self._hub_metrics),
+            fleet=self._fleet.snapshot(),
+            total_active_drones=len(self._drones),
+            total_craning=total_craning,
+            total_orders_received=self._total_orders_received,
+            total_orders_dispatched=self._total_orders,
+            total_craning_events=self._total_craning_events,
+            rl_rebalancing_moves=self._rl_total_moves,
+            rl_drones_rebalanced=self._rl_total_drones,
         )
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _recount_pads(self) -> None:
-        """Reset and recount pad usage from current drone states."""
-        for m in self._hub_metrics.values():
-            m.pads_in_use = 0
-            m.drones_craning = 0
-
-        for drone in self._drones.values():
-            if drone.state in (DroneState.LANDING, DroneState.COOLDOWN):
-                m = self._get_hub_metrics(drone.corridor.destination.id)
-                m.pads_in_use += 1
-                m.total_landings += 1 if drone.state == DroneState.COOLDOWN else 0
-            elif drone.state == DroneState.CRANING:
-                m = self._get_hub_metrics(drone.corridor.destination.id)
-                m.drones_craning += 1
+        recount_hub_metrics(
+            self._drones.values(),
+            self._hub_metrics,
+            self._get_hub_metrics,
+        )
 
     def _handle_order_request(self, request: DispatchRequest) -> None:
         self._total_orders_received += 1
-
         origin_hub_id = request.origin_hub_id
 
-        # If this hub already has a backlog, respect FIFO — queue and try to drain.
         if self._pending_orders_by_hub.get(origin_hub_id):
             self._queue_request(request)
             self._drain_origin_queue(origin_hub_id)
             return
 
-        # Try direct dispatch from the designated origin hub.
         if self._launch_request(request):
             return
 
-        # Cross-hub fallback: find another hub with an idle drone and a viable
-        # corridor to the same destination, then serve the order from there.
-        # This breaks the "locked-to-origin" bottleneck: customers get served
-        # from the nearest available hub instead of waiting for rebalancing.
-        alt = self._cross_hub_request(request)
-        if alt is not None and self._launch_request(alt):
-            return
-
-        # No drone available anywhere for this destination — queue at origin.
-        self._queue_request(request)
-
-    def _cross_hub_request(
-        self, request: DispatchRequest
-    ) -> Optional[DispatchRequest]:
-        """
-        Find an alternative origin hub that can serve the same destination.
-
-        Searches the dispatcher's shortlisted corridors for any corridor whose
-        destination matches ``request``'s destination AND whose origin hub has
-        an idle drone.  Returns a new DispatchRequest using the shortest such
-        corridor (minimum flight distance), or None if no alternative exists.
-
-        Why shortest, not fastest?
-            All corridors share the same cruise speed, so shortest ≡ fastest.
-            We prefer the nearest alternative hub to minimise dead-head impact.
-        """
-        dest_hub_id = request.destination_hub_id
-        best_corridor = None
-        best_km = float("inf")  # straight_line_m of best candidate so far
-
-        for sc in self._dispatcher.shortlist:
-            corr = sc.corridor
-            if (
-                corr.destination.id == dest_hub_id
-                and corr.origin.id != request.origin_hub_id
-                and self._fleet.has_idle_drone(corr.origin.id)
-                and corr.straight_line_m < best_km
-            ):
-                best_km = corr.straight_line_m
-                best_corridor = corr
-
-        if best_corridor is None:
-            return None
-
-        return DispatchRequest(
-            request_id=request.request_id,
-            corridor=best_corridor,
+        alternative_corridor = choose_cross_hub_corridor(
+            request,
+            self._dispatcher.shortlist,
+            self._fleet,
         )
+        if alternative_corridor is not None:
+            alternative_request = DispatchRequest(
+                request_id=request.request_id,
+                corridor=alternative_corridor,
+            )
+            if self._launch_request(alternative_request):
+                return
+
+        self._queue_request(request)
 
     def _queue_request(self, request: DispatchRequest) -> None:
         origin_hub_id = request.origin_hub_id
@@ -301,70 +252,32 @@ class DroneRegistry:
 
         while pending and self._fleet.has_idle_drone(hub_id):
             request = pending[0]
-            launched = self._launch_request(request)
-            if not launched:
+            if not self._launch_request(request):
                 break
             pending.popleft()
             self._fleet.pop_queued_orders(hub_id)
 
-    def _pad_free(self, hub_id: int, exclude_drone: Drone) -> bool:
-        """True if the hub has at least one pad not occupied by a different drone."""
-        m = self._get_hub_metrics(hub_id)
-        occupied = sum(
-            1 for d in self._drones.values()
-            if d.drone_id != exclude_drone.drone_id
-            and d.state in (DroneState.LANDING, DroneState.COOLDOWN)
-            and d.corridor.destination.id == hub_id
+    def _pad_free(self, hub_id: int, drone: Drone) -> bool:
+        return pad_is_free(
+            hub_id,
+            self._drones.values(),
+            self._hub_metrics,
+            drone.drone_id,
+            self._get_hub_metrics,
         )
-        return occupied < m.k_pads
 
     def _get_hub_metrics(self, hub_id: int) -> HubMetrics:
         if hub_id not in self._hub_metrics:
-            self._hub_metrics[hub_id] = HubMetrics(
-                hub_id=hub_id, k_pads=self._default_k
-            )
+            self._hub_metrics[hub_id] = HubMetrics(hub_id=hub_id, k_pads=self._default_k)
         return self._hub_metrics[hub_id]
-
-    def reset(self) -> None:
-        self._drones.clear()
-        self._fleet = FleetPool.from_hub_sizing(
-            self._hub_sizing_results,
-            total_fleet_size=self._fleet.total_fleet_size,
-        )
-        self._pending_orders_by_hub = {
-            hub_id: deque() for hub_id in self._fleet.active_hub_ids
-        }
-        for m in self._hub_metrics.values():
-            m.pads_in_use = 0
-            m.drones_craning = 0
-            m.total_landings = 0
-            m.total_craning_events = 0
-        self._total_orders_received = 0
-        self._total_orders = 0
-        self._total_craning_events = 0
-        self._rl_accumulator_s = 0.0
-        self._rl_total_moves   = 0
-        self._rl_total_drones  = 0
-        if self._rl_bridge is not None:
-            self._rl_bridge.reset_episode()
 
     @staticmethod
     def _parse_sim_hour(hhmm: str) -> float:
-        """Convert '18:42' → 18.7."""
         try:
-            h, m = hhmm.split(":")
-            return int(h) + int(m) / 60.0
-        except (ValueError, AttributeError):
+            hour, minute = hhmm.split(":")
+            return int(hour) + int(minute) / 60.0
+        except (AttributeError, ValueError):
             return 0.0
 
 
-# ---------------------------------------------------------------------------
-# Lightweight snapshot proxy used for RL observation building.
-# Avoids building a full SimSnapshot just for the RL step.
-# ---------------------------------------------------------------------------
-
-@dataclass
-class _ObsSnapshot:
-    """Minimal snapshot passed to RLBridge.step() at each heartbeat."""
-    fleet: FleetSnapshot
-    hub_metrics: Dict[int, "HubMetrics"]
+__all__ = ["DroneRegistry", "HubMetrics", "SimSnapshot"]

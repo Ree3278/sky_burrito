@@ -7,20 +7,23 @@ Keeping layer construction out of app.py makes them testable and reusable.
 
 from __future__ import annotations
 
-from typing import Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List
 
 import pydeck as pdk
 
 from .config import (
     COLOR_CORRIDOR_ARC,
-    COLOR_HUB_HEAVY, COLOR_HUB_MODERATE, COLOR_HUB_LIGHT,
-    COLOR_PAD_BUSY, COLOR_PAD_FREE,
+    COLOR_HUB_HEAVY,
+    COLOR_HUB_LIGHT,
+    COLOR_HUB_MODERATE,
+    COLOR_PAD_BUSY,
 )
 
 if TYPE_CHECKING:
-    from .registry import SimSnapshot, HubMetrics
     from corridor_pruning.pruning import ScoredCorridor
     from hub_sizing.sizing import HubSizingResult
+
+    from .registry import HubMetrics, SimSnapshot
 
 
 # ── Corridors ─────────────────────────────────────────────────────────────────
