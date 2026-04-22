@@ -9,4 +9,4 @@ BUILDINGS_CSV = DATA_DIR / "Building_Footprints_20260410.csv"
 LANDUSE_CSV = DATA_DIR / "San_Francisco_Land_Use_-_2023_20260410.csv"
 
 STREAMLIT_APP = Path("simulation/app.py")
-
+SIMULATION_SETUP_JSON = DATA_DIR / "simulation_setup.json"

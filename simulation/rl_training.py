@@ -21,6 +21,7 @@ import tensorboard
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from simulation.environment import load_or_build_simulation_setup
 from simulation.rl_fleet_env import DroneFleetEnv
 
 
@@ -29,6 +30,7 @@ class CurriculumCallback:
     
     def __init__(self, phase: int = 1):
         self.phase = phase
+        self.setup = load_or_build_simulation_setup()
         self.phase_config = self._get_phase_config(phase)
     
     def _get_phase_config(self, phase: int) -> dict:
@@ -37,7 +39,6 @@ class CurriculumCallback:
             1: {  # Single hub - easiest
                 "name": "Single Hub (Hub 6 only)",
                 "active_hubs": ["Hub 6"],
-                "routes": 5,
                 "episode_length": 360,  # 6 hours
                 "timesteps": 50_000,
                 "learning_rate": 1e-3,
@@ -48,7 +49,6 @@ class CurriculumCallback:
             2: {  # Two-hub bidirectional
                 "name": "Two Hubs Bidirectional (Hub 11 ↔ Hub 9)",
                 "active_hubs": ["Hub 11", "Hub 9"],
-                "routes": 2,
                 "episode_length": 720,  # 12 hours
                 "timesteps": 100_000,
                 "learning_rate": 5e-4,
@@ -57,12 +57,8 @@ class CurriculumCallback:
                 "n_epochs": 20,
             },
             3: {  # Full network
-                "name": "Full Network (9 hubs, 20 routes)",
-                "active_hubs": [
-                    "Hub 1", "Hub 2", "Hub 3", "Hub 5", "Hub 6",
-                    "Hub 7", "Hub 9", "Hub 10", "Hub 11"
-                ],
-                "routes": 20,
+                "name": "Full Network",
+                "active_hubs": list(self.setup.active_hub_names),
                 "episode_length": 1440,  # 24 hours
                 "timesteps": 500_000,
                 "learning_rate": 3e-4,
@@ -72,11 +68,7 @@ class CurriculumCallback:
             },
             4: {  # Full network with meal-time peaks
                 "name": "Full Network with Meal-Time Peaks",
-                "active_hubs": [
-                    "Hub 1", "Hub 2", "Hub 3", "Hub 5", "Hub 6",
-                    "Hub 7", "Hub 9", "Hub 10", "Hub 11"
-                ],
-                "routes": 20,
+                "active_hubs": list(self.setup.active_hub_names),
                 "episode_length": 1440,  # 24 hours
                 "timesteps": 1_000_000,
                 "learning_rate": 2e-4,
@@ -85,7 +77,17 @@ class CurriculumCallback:
                 "n_epochs": 20,
             },
         }
-        return configs.get(phase, configs[1])
+        phase_config = configs.get(phase, configs[1])
+        phase_config["routes"] = self._count_routes_for_hubs(phase_config["active_hubs"])
+        return phase_config
+
+    def _count_routes_for_hubs(self, active_hubs: list[str]) -> int:
+        active = set(active_hubs)
+        return sum(
+            1
+            for route in self.setup.routes
+            if f"Hub {route.origin_id}" in active and f"Hub {route.destination_id}" in active
+        )
     
     def get_config(self) -> dict:
         return self.phase_config
@@ -121,6 +123,7 @@ def create_environment(fleet_size: int, phase: int = 1, curriculum: CurriculumCa
         episode_length_hours=episode_hours,
         sim_speedup=60,  # 1 minute per step
         active_hubs=cfg['active_hubs'],
+        simulation_setup=curriculum.setup,
     )
     
     return env

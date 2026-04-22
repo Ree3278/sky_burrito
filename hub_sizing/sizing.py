@@ -21,17 +21,14 @@ from typing import Dict, List, TYPE_CHECKING
 from .demand import estimate_demand, HubDemand
 from .service import ServiceSpec, default_service_spec
 from .mgk import solve_k, MGKResult
+from settings.hub_sizing import (
+    BATTERY_BAYS_PER_PAD,
+    TIER_HEAVY_A,
+    TIER_MODERATE_A,
+)
 
 if TYPE_CHECKING:
     from corridor_pruning.pruning import ScoredCorridor
-
-# One battery bay per landing pad (simplest configuration)
-BATTERY_BAYS_PER_PAD: int = 1
-
-# Hub tier thresholds (offered load a = λ × E[S])
-TIER_HEAVY_A    = 2.0
-TIER_MODERATE_A = 1.0
-
 
 @dataclass
 class HubSizingResult:

@@ -26,20 +26,18 @@ Missing inputs
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, Iterable, List, TYPE_CHECKING
 
-from settings.pipeline import NETWORK_PEAK_ORDERS_PER_HOUR
+from settings.pipeline import NETWORK_PEAK_ORDERS_PER_HOUR, PEAK_MULTIPLIER
 
 if TYPE_CHECKING:
     from corridor_pruning.pruning import ScoredCorridor
     from corridor_pruning.hubs import Hub
+    from simulation.environment import HubSetup
 
 # ── Stub parameters ──────────────────────────────────────────────────────────
 
-# Ratio of peak-hour volume to the flat average used above.
-# Friday 7–9 PM in SF food delivery is ~2–3× the daily average.
-# ⚠ Replace with empirical peak factor from order data.
-PEAK_MULTIPLIER: float = 1.0   # already expressed as peak in the constant above
+
 
 
 @dataclass
@@ -49,6 +47,26 @@ class HubDemand:
     lambda_per_hour: float      # arrivals/hr  (λ)
     lambda_per_min: float       # arrivals/min (λ/60) — used in M/G/k
     is_stub: bool = True
+
+
+def hub_profiles_from_setup_hubs(
+    hubs: "Iterable[HubSetup]",
+    service_cv_squared: float,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Convert persisted setup hubs into RL-style demand profiles.
+
+    The hub-sizing pipeline already computed λ/hr for each active hub.
+    RL uses λ/min as its base demand profile, so we derive it directly here
+    instead of maintaining a separate manual table.
+    """
+    profiles: Dict[str, Dict[str, float]] = {}
+    for hub in hubs:
+        profiles[f"Hub {hub.hub_id}"] = {
+            "lambda_base": hub.lambda_per_hour / 60.0,
+            "cv_squared": service_cv_squared,
+        }
+    return profiles
 
 
 def estimate_demand(

@@ -28,63 +28,42 @@ _PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, os.path.join(_PROJECT_ROOT, 'hub_sizing'))
 sys.path.insert(0, _PROJECT_ROOT)
 
-from mgk import solve_k, MGKResult
+from hub_sizing.demand import hub_profiles_from_setup_hubs
+from hub_sizing.mgk import solve_k, MGKResult
 from rebalancing.ghost_logic import GhostHeuristic, GhostConfig, GhostMove
+from simulation.environment import SimulationSetup, load_or_build_simulation_setup
+from settings.rl import (
+    ACTION_MAX,
+    ACTION_MIN,
+    CONTINUOUS_REBALANCING,
+    CRANING_PENALTY,
+    DEADHEAD_BATTERY_REQUIRED,
+    DEADHEAD_PENALTY,
+    DEFAULT_DEMAND_VARIABILITY,
+    DELIVERY_DURATION_MINUTES,
+    DEMAND_BASELINE_MULTIPLIER,
+    FULFILLMENT_BONUS,
+    GHOST_HEARTBEAT_MINUTES,
+    IDLE_BONUS_SCALE,
+    IDLE_BONUS_THRESHOLD,
+    MEAL_MULTIPLIERS as RL_MEAL_MULTIPLIERS,
+    MGK_MEAN_SERVICE_MIN,
+    MGK_P_CRAN_TARGET,
+    MGK_UTIL_CAP,
+    QUEUE_OBSERVATION_CAP,
+    QUEUE_PENALTY_CAP_MULTIPLIER,
+    QUEUE_PENALTY_PER_ORDER,
+    REBALANCE_ENABLED_HOURS,
+    REWARD_NORMALIZATION,
+    STARVED_HUB_PENALTY,
+    STARVED_HUB_QUEUE_THRESHOLD,
+    TIME_ENCODING_PERIOD_HOURS,
+)
 
 
 # ============================================================================
 # Constants & Configuration
 # ============================================================================
-
-VIABLE_ROUTES = [
-    ('Hub 11', 'Hub 9', 2.40),   # Route 1: Score 1035.5
-    ('Hub 9', 'Hub 11', 2.40),   # Route 2: Score 1008.0
-    ('Hub 10', 'Hub 6', 2.44),   # Route 3: Score 1004.4
-    ('Hub 1', 'Hub 9', 2.25),    # Route 4: Score 952.0
-    ('Hub 9', 'Hub 1', 2.25),    # Route 5: Score 948.2
-    ('Hub 11', 'Hub 2', 2.18),   # Route 6: Score 947.1
-    ('Hub 6', 'Hub 10', 2.44),   # Route 7: Score 944.5
-    ('Hub 2', 'Hub 11', 2.18),   # Route 8: Score 942.8
-    ('Hub 2', 'Hub 1', 2.14),    # Route 9: Score 934.8
-    ('Hub 9', 'Hub 6', 2.29),    # Route 10: Score 928.5
-    ('Hub 3', 'Hub 6', 2.18),    # Route 11: Score 924.2
-    ('Hub 1', 'Hub 2', 2.14),    # Route 12: Score 918.5
-    ('Hub 6', 'Hub 9', 2.29),    # Route 13: Score 901.1
-    ('Hub 10', 'Hub 11', 2.14),  # Route 14: Score 885.6
-    ('Hub 11', 'Hub 10', 2.14),  # Route 15: Score 883.4
-    ('Hub 6', 'Hub 3', 2.18),    # Route 16: Score 873.3
-    ('Hub 7', 'Hub 1', 1.87),    # Route 17: Score 802.3
-    ('Hub 5', 'Hub 6', 1.89),    # Route 18: Score 800.9
-    ('Hub 1', 'Hub 7', 1.87),    # Route 19: Score 787.4
-    ('Hub 2', 'Hub 6', 1.91),    # Route 20: Score 783.3
-]
-
-ACTIVE_HUBS = [
-    'Hub 1', 'Hub 2', 'Hub 3', 'Hub 5', 'Hub 6',
-    'Hub 7', 'Hub 9', 'Hub 10', 'Hub 11'
-]
-
-DEADHEAD_BATTERY_REQUIRED = {
-    'Hub 1': 0.15,   # 15% battery needed
-    'Hub 2': 0.15,
-    'Hub 3': 0.15,
-    'Hub 5': 0.20,
-    'Hub 6': 0.15,
-    'Hub 7': 0.20,
-    'Hub 9': 0.15,
-    'Hub 10': 0.20,
-    'Hub 11': 0.15,
-}
-
-REBALANCE_ENABLED_HOURS = [
-    (7, 9),        # Breakfast: 7-9 AM
-    (11.5, 13.5),  # Lunch: 11:30 AM - 1:30 PM
-    (15, 17),      # Snack: 3-5 PM
-    (18, 20),      # Dinner: 6-8 PM
-]
-
-# Continuous rebalancing always allowed (but costly during off-peak)
-CONTINUOUS_REBALANCING = True
 
 
 # ============================================================================
@@ -94,7 +73,7 @@ CONTINUOUS_REBALANCING = True
 @dataclass
 class DroneState:
     """State of a single drone."""
-    hub_id: int  # Index into ACTIVE_HUBS
+    hub_id: int  # Index into the environment's hub_names list
     battery_level: float  # 0.0-1.0
     in_flight: bool
     status: str  # 'idle', 'delivering', 'rebalancing', 'charging', 'craning'
@@ -132,25 +111,10 @@ class DemandGenerator:
     # λ = base arrival rate per minute
     # cv² = coefficient of variation squared (service time variability)
     # INCREASED 10x to fix demand generation issue
-    HUB_PROFILES = {
-        'Hub 1': {'lambda_base': 1.5, 'cv_squared': 0.8},    # Office area
-        'Hub 2': {'lambda_base': 1.2, 'cv_squared': 0.9},    # Light area
-        'Hub 3': {'lambda_base': 1.8, 'cv_squared': 0.8},    # Residential
-        'Hub 5': {'lambda_base': 0.8, 'cv_squared': 1.0},    # Remote
-        'Hub 6': {'lambda_base': 1.4, 'cv_squared': 0.85},   # Mixed
-        'Hub 7': {'lambda_base': 1.0, 'cv_squared': 0.95},   # Light area
-        'Hub 9': {'lambda_base': 2.2, 'cv_squared': 0.8},    # Downtown (busiest)
-        'Hub 10': {'lambda_base': 1.1, 'cv_squared': 0.90},  # Suburban
-        'Hub 11': {'lambda_base': 1.6, 'cv_squared': 0.85},  # Tech hub
-    }
+    HUB_PROFILES: Dict[str, Dict[str, float]] = {}
     
     # Meal time multipliers (how much demand increases during peaks)
-    MEAL_MULTIPLIERS = {
-        'breakfast': {'start': 7.0, 'peak': 8.0, 'end': 9.0, 'multiplier': 1.5},
-        'lunch': {'start': 11.5, 'peak': 12.5, 'end': 13.5, 'multiplier': 2.2},
-        'snack': {'start': 15.0, 'peak': 16.0, 'end': 17.0, 'multiplier': 1.3},
-        'dinner': {'start': 18.0, 'peak': 19.0, 'end': 20.0, 'multiplier': 2.0},
-    }
+    MEAL_MULTIPLIERS = RL_MEAL_MULTIPLIERS
     
     @staticmethod
     def gaussian_peak(hour: float, peak_hour: float, start: float, end: float, multiplier: float) -> float:
@@ -167,7 +131,7 @@ class DemandGenerator:
         Returns overall demand intensity (0-2.2) for the given hour.
         Uses MGk meal peak model instead of pure sine/cosine curves.
         """
-        base_multiplier = 0.3  # Off-peak baseline
+        base_multiplier = DEMAND_BASELINE_MULTIPLIER
         
         # Add meal time peaks using MGk-informed Gaussian shapes
         for meal_name, meal_info in cls.MEAL_MULTIPLIERS.items():
@@ -183,7 +147,7 @@ class DemandGenerator:
         return base_multiplier
     
     @classmethod
-    def generate_hub_demand(cls, hub_name: str, hour: float, mean_service_min: float = 3.0) -> Dict[str, float]:
+    def generate_hub_demand(cls, hub_name: str, hour: float, mean_service_min: float = MGK_MEAN_SERVICE_MIN) -> Dict[str, float]:
         """
         Generate demand for a specific hub using M/G/k model.
         
@@ -215,8 +179,8 @@ class DemandGenerator:
                 lambda_per_min=lambda_per_min,
                 mean_service_min=mean_service_min,
                 cv_squared=profile['cv_squared'],
-                p_cran_target=0.05,  # Target 5% craning
-                util_cap=0.85  # Target 85% utilisation
+                p_cran_target=MGK_P_CRAN_TARGET,
+                util_cap=MGK_UTIL_CAP,
             )
         except Exception as e:
             # Fallback if MGk fails
@@ -271,8 +235,9 @@ class DroneFleetEnv(gym.Env):
         fleet_size: int = 20,
         episode_length_hours: float = 24.0,
         sim_speedup: float = 10.0,
-        demand_variability: str = 'meal_time_peaks',
+        demand_variability: str = DEFAULT_DEMAND_VARIABILITY,
         active_hubs: Optional[List[str]] = None,
+        simulation_setup: Optional[SimulationSetup] = None,
         seed: Optional[int] = None,
     ):
         """
@@ -290,17 +255,29 @@ class DroneFleetEnv(gym.Env):
         if sim_speedup <= 0:
             raise ValueError("sim_speedup must be positive")
 
+        self.setup = simulation_setup or load_or_build_simulation_setup()
         self.fleet_size = fleet_size
         self.episode_length_hours = episode_length_hours
         self.sim_speedup = sim_speedup
         self.demand_variability = demand_variability
-        self.hub_names = list(ACTIVE_HUBS)
+        self.hub_names = list(self.setup.active_hub_names)
         self.num_hubs = len(self.hub_names)
         self.active_hubs = list(active_hubs) if active_hubs is not None else list(self.hub_names)
         invalid_hubs = sorted(set(self.active_hubs) - set(self.hub_names))
         if invalid_hubs:
             raise ValueError(f"Unknown active hubs: {invalid_hubs}")
         self.active_hub_indices = [self.hub_names.index(hub) for hub in self.active_hubs]
+        self.viable_routes = [
+            (f"Hub {route.origin_id}", f"Hub {route.destination_id}", route.straight_line_m / 1000.0)
+            for route in self.setup.routes
+            if f"Hub {route.origin_id}" in self.active_hubs
+            and f"Hub {route.destination_id}" in self.active_hubs
+        ]
+        self.hub_profiles = hub_profiles_from_setup_hubs(
+            self.setup.hubs,
+            service_cv_squared=self.setup.service_cv_squared,
+        )
+        DemandGenerator.HUB_PROFILES = self.hub_profiles
         self.rng = np.random.RandomState(seed)
         
         # Time tracking
@@ -308,7 +285,7 @@ class DroneFleetEnv(gym.Env):
         self.timestep = 0
         self.step_minutes = 60.0 / sim_speedup
         self.max_timesteps = max(1, int(round((episode_length_hours * 60) / self.step_minutes)))
-        self.delivery_duration_steps = max(1, math.ceil(3.0 / self.step_minutes))
+        self.delivery_duration_steps = max(1, math.ceil(DELIVERY_DURATION_MINUTES / self.step_minutes))
         
         # State tracking
         self.fleet_state: Optional[FleetState] = None
@@ -332,8 +309,8 @@ class DroneFleetEnv(gym.Env):
         # Action: 9D continuous vector
         # Each hub can send/receive drones [-5, +5], sum must = 0
         self.action_space = spaces.Box(
-            low=-5.0,
-            high=5.0,
+            low=ACTION_MIN,
+            high=ACTION_MAX,
             shape=(self.num_hubs,),
             dtype=np.float32
         )
@@ -351,11 +328,11 @@ class DroneFleetEnv(gym.Env):
         self._ghost_config = GhostConfig()
         self._ghost_heuristic = GhostHeuristic(
             hub_names=self.hub_names,
-            viable_routes=VIABLE_ROUTES,
+            viable_routes=self.viable_routes,
             config=self._ghost_config,
         )
         # heartbeat: every 5 simulated minutes
-        self._ghost_heartbeat_steps: int = max(1, round(5.0 / self.step_minutes))
+        self._ghost_heartbeat_steps: int = max(1, round(GHOST_HEARTBEAT_MINUTES / self.step_minutes))
         self._ghost_step_counter: int = 0
         # Episode-level ghost stats (reset on env.reset())
         self.episode_ghost_moves: int = 0
@@ -443,7 +420,7 @@ class DroneFleetEnv(gym.Env):
         Distribute drones across hubs based on demand profiles.
         
         For multi-hub environments, allocates drones proportionally to each hub's
-        demand profile (base lambda from DemandGenerator.HUB_PROFILES).
+        demand profile (base lambda from the loaded simulation setup).
         
         Returns:
             Array of drone counts per hub, sums to fleet_size
@@ -458,7 +435,7 @@ class DroneFleetEnv(gym.Env):
             return drone_allocation.astype(np.float32)
 
         demand_weights = np.array([
-            DemandGenerator.HUB_PROFILES[self.hub_names[idx]]['lambda_base']
+            self.hub_profiles[self.hub_names[idx]]['lambda_base']
             for idx in self.active_hub_indices
         ])
         demand_probs = demand_weights / demand_weights.sum()
@@ -472,6 +449,7 @@ class DroneFleetEnv(gym.Env):
             drone_allocation[highest_demand_hub] += remaining
         
         return drone_allocation.astype(np.float32)
+
 
     def _reset_step_counters(self) -> None:
         """Reset per-step metrics so rewards are not cumulative artifacts."""
@@ -623,7 +601,7 @@ class DroneFleetEnv(gym.Env):
         - Can only rebalance if battery sufficient
         - Can only use idle drones
         """
-        action_clipped = np.clip(action, -5, 5)
+        action_clipped = np.clip(action, ACTION_MIN, ACTION_MAX)
         action_sum = np.sum(action_clipped)
         if abs(action_sum) > 1e-6:
             action_clipped[0] -= action_sum
@@ -760,7 +738,7 @@ class DroneFleetEnv(gym.Env):
             hub_demand = DemandGenerator.generate_hub_demand(
                 hub_name=hub_name,
                 hour=self.current_hour,
-                mean_service_min=3.0  # Average 3 minute delivery
+                mean_service_min=MGK_MEAN_SERVICE_MIN
             )
             
             # Generate Poisson arrivals based on lambda from MGk model
@@ -838,7 +816,11 @@ class DroneFleetEnv(gym.Env):
         obs[0:self.num_hubs] = self.fleet_state.idle_per_hub / self.fleet_size
         
         # Queue per hub (normalized, assume max 50 orders)
-        obs[self.num_hubs:2*self.num_hubs] = np.clip(self.order_queues / 50, 0, 1)
+        obs[self.num_hubs:2*self.num_hubs] = np.clip(
+            self.order_queues / QUEUE_OBSERVATION_CAP,
+            0,
+            1,
+        )
         
         # Utilization per hub
         obs[2*self.num_hubs:3*self.num_hubs] = self.fleet_state.utilization_per_hub
@@ -851,8 +833,8 @@ class DroneFleetEnv(gym.Env):
         obs[31:31+self.num_hubs] = self.fleet_state.battery_per_hub
         
         # Time sin/cos
-        obs[40] = np.sin(2 * np.pi * self.current_hour / 24)
-        obs[41] = np.cos(2 * np.pi * self.current_hour / 24)
+        obs[40] = np.sin(2 * np.pi * self.current_hour / TIME_ENCODING_PERIOD_HOURS)
+        obs[41] = np.cos(2 * np.pi * self.current_hour / TIME_ENCODING_PERIOD_HOURS)
         
         return obs
     
@@ -880,27 +862,27 @@ class DroneFleetEnv(gym.Env):
         5. Dead-head cost     : −5 per dead-heading drone
         6. Idle bonus         : +10 × (idle − 5) / fleet_size  (if idle > 5)
         """
-        fulfillment_bonus_raw = 50 * self.fleet_state.orders_fulfilled_this_step
+        fulfillment_bonus_raw = FULFILLMENT_BONUS * self.fleet_state.orders_fulfilled_this_step
 
         # Capped queue penalty — prevents saturation at large backlogs.
         total_queue_length = float(np.sum(self.order_queues))
-        queue_cap          = float(self.fleet_size * 10)   # e.g. 300 for fleet_30
-        queue_penalty_raw  = -10 * min(total_queue_length, queue_cap)
+        queue_cap          = float(self.fleet_size * QUEUE_PENALTY_CAP_MULTIPLIER)
+        queue_penalty_raw  = -QUEUE_PENALTY_PER_ORDER * min(total_queue_length, queue_cap)
 
         # Per-hub starvation penalty — rewards pre-positioning.
         starved_hubs = sum(
             1 for i in self.active_hub_indices
-            if self.order_queues[i] > 3 and self.fleet_state.idle_per_hub[i] == 0
+            if self.order_queues[i] > STARVED_HUB_QUEUE_THRESHOLD and self.fleet_state.idle_per_hub[i] == 0
         )
-        starved_penalty_raw = -50 * starved_hubs
+        starved_penalty_raw = -STARVED_HUB_PENALTY * starved_hubs
 
-        craning_penalty_raw  = -200 * self.fleet_state.drones_craning
-        deadhead_penalty_raw = -5   * self.fleet_state.drones_deadheading
+        craning_penalty_raw  = -CRANING_PENALTY * self.fleet_state.drones_craning
+        deadhead_penalty_raw = -DEADHEAD_PENALTY * self.fleet_state.drones_deadheading
 
         total_idle    = float(np.sum(self.fleet_state.idle_per_hub))
         idle_bonus_raw = 0.0
-        if total_idle > 5:
-            idle_bonus_raw = 10 * (total_idle - 5) / self.fleet_size
+        if total_idle > IDLE_BONUS_THRESHOLD:
+            idle_bonus_raw = IDLE_BONUS_SCALE * (total_idle - IDLE_BONUS_THRESHOLD) / self.fleet_size
 
         raw_total = (
             fulfillment_bonus_raw
@@ -911,14 +893,14 @@ class DroneFleetEnv(gym.Env):
             + idle_bonus_raw
         )
 
-        reward = raw_total / 100.0
+        reward = raw_total / REWARD_NORMALIZATION
         self.last_reward_components = {
-            "fulfillment_bonus":  fulfillment_bonus_raw  / 100.0,
-            "queue_penalty":      queue_penalty_raw       / 100.0,
-            "starved_penalty":    starved_penalty_raw     / 100.0,
-            "craning_penalty":    craning_penalty_raw     / 100.0,
-            "deadhead_penalty":   deadhead_penalty_raw    / 100.0,
-            "idle_bonus":         idle_bonus_raw          / 100.0,
+            "fulfillment_bonus":  fulfillment_bonus_raw  / REWARD_NORMALIZATION,
+            "queue_penalty":      queue_penalty_raw       / REWARD_NORMALIZATION,
+            "starved_penalty":    starved_penalty_raw     / REWARD_NORMALIZATION,
+            "craning_penalty":    craning_penalty_raw     / REWARD_NORMALIZATION,
+            "deadhead_penalty":   deadhead_penalty_raw    / REWARD_NORMALIZATION,
+            "idle_bonus":         idle_bonus_raw          / REWARD_NORMALIZATION,
             "total":              reward,
             "queue_length":       total_queue_length,
             "starved_hubs":       float(starved_hubs),

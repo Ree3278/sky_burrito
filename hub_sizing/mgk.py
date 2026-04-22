@@ -35,11 +35,17 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from settings.hub_sizing import (
+    MGK_MAX_K_SEARCH,
+    MGK_P_CRAN_TARGET,
+    MGK_UTIL_CAP,
+)
+
 # ── Targets ──────────────────────────────────────────────────────────────────
 
-P_CRAN_TARGET: float = 0.05   # max acceptable P(craning)   — 5 %
-UTIL_CAP:      float = 0.85   # max acceptable pad utilisation — 85 %
-MAX_K_SEARCH:  int   = 20     # upper bound for k search
+P_CRAN_TARGET: float = MGK_P_CRAN_TARGET
+UTIL_CAP: float = MGK_UTIL_CAP
+MAX_K_SEARCH: int = MGK_MAX_K_SEARCH
 
 
 # ── Core Erlang-C ─────────────────────────────────────────────────────────────

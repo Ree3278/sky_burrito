@@ -34,6 +34,7 @@ from siting_strategy import (
     plot_walk_zones,
 )
 from settings.paths import BUILDINGS_CSV, LANDUSE_CSV, RESTAURANTS_CSV, STREAMLIT_APP
+from settings.paths import SIMULATION_SETUP_JSON
 from settings.pipeline import (
     DEFAULT_CORRIDOR_SIM_HOUR,
     DEFAULT_DEMAND_SCALE,
@@ -42,8 +43,11 @@ from settings.pipeline import (
 )
 from settings.simulation import DEFAULT_FLEET_SIZE
 from simulation.environment import (
-    SimulationEnvironmentConfig,
-    build_simulation_environment,
+    SimulationSetupConfig,
+    SimulationRuntimeConfig,
+    build_runtime_environment,
+    build_simulation_setup,
+    save_simulation_setup,
 )
 
 ENTRYPOINTS = {"siting", "corridors", "sizing", "simulate"}
@@ -153,25 +157,33 @@ def run_sizing_report(
     demand_scale: float = DEFAULT_DEMAND_SCALE,
     fleet_size: int = DEFAULT_FLEET_SIZE,
     use_automated_swap: bool = False,
+    output_path: str = str(SIMULATION_SETUP_JSON),
 ) -> None:
     print("=" * 60)
     print("  SKY BURRITO — SIMULATION ENVIRONMENT SETUP")
     print("=" * 60)
-    environment = build_simulation_environment(
-        SimulationEnvironmentConfig(
+    setup = build_simulation_setup(
+        SimulationSetupConfig(
             route_count=top_n,
             sim_hour=sim_hour,
-            demand_scale=demand_scale,
-            fleet_size=fleet_size,
             use_automated_swap=use_automated_swap,
         )
+    )
+    output = save_simulation_setup(setup, output_path)
+    environment = build_runtime_environment(
+        setup,
+        runtime_config=SimulationRuntimeConfig(
+            demand_scale=demand_scale,
+            fleet_size=fleet_size,
+        ),
     )
     print(
         f"Simulation routes: {len(environment.routes)} | "
         f"active hubs: {len(environment.active_hub_ids)} | "
-        f"fleet size: {environment.config.fleet_size} | "
+        f"fleet size: {environment.runtime_config.fleet_size} | "
         f"peak demand: {environment.network_peak_orders_per_hour:.1f}/hr"
     )
+    print(f"Saved setup: {output}")
 
 
 def run_simulation() -> None:
@@ -256,6 +268,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use the faster automated battery-swap service spec during hub sizing",
     )
+    sizing.add_argument(
+        "--output",
+        type=str,
+        default=str(SIMULATION_SETUP_JSON),
+        help="Path to the persisted simulation setup JSON",
+    )
 
     subparsers.add_parser(
         "simulate",
@@ -295,6 +313,7 @@ def cli(argv: list[str] | None = None) -> int:
             demand_scale=args.demand_scale,
             fleet_size=args.fleet_size,
             use_automated_swap=args.use_automated_swap,
+            output_path=args.output,
         )
         return 0
 

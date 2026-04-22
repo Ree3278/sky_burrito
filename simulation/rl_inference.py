@@ -46,6 +46,7 @@ def load_and_evaluate(
         episode_length_hours=cfg['episode_length'] / 60.0,
         sim_speedup=60,
         active_hubs=cfg['active_hubs'],
+        simulation_setup=curriculum.setup,
     )
     
     # Evaluate

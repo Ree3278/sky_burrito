@@ -38,9 +38,12 @@ from simulation.config import (
 )
 from simulation.clock import SimClock
 from simulation.environment import (
-    SimulationEnvironmentConfig,
-    build_simulation_environment,
+    SimulationRuntimeConfig,
+    SimulationSetupConfig,
+    build_runtime_environment,
     create_registry,
+    load_simulation_setup,
+    load_or_build_simulation_setup,
 )
 from simulation.rl_bridge import RLBridge
 from simulation.layers import (
@@ -51,8 +54,21 @@ from simulation.layers import (
     drone_layer,
     craning_ring_layer,
 )
-from settings.pipeline import DEFAULT_DEMAND_SCALE, NETWORK_PEAK_ORDERS_PER_HOUR
+from settings.paths import SIMULATION_SETUP_JSON
+from settings.pipeline import (
+    DEFAULT_CORRIDOR_SIM_HOUR,
+    DEFAULT_DEMAND_SCALE,
+    DEFAULT_SIMULATION_CORRIDOR_COUNT,
+    NETWORK_PEAK_ORDERS_PER_HOUR,
+)
 from settings.simulation import DEFAULT_FLEET_SIZE, RL_FLEET_SIZES
+
+_SETUP_PATH_EXISTS = SIMULATION_SETUP_JSON.exists()
+_SETUP_BASELINE_ORDERS_PER_HOUR = (
+    load_simulation_setup(SIMULATION_SETUP_JSON).network_peak_orders_per_hour
+    if _SETUP_PATH_EXISTS
+    else NETWORK_PEAK_ORDERS_PER_HOUR
+)
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -293,15 +309,27 @@ def load_environment(
     fleet_size: int = DEFAULT_FLEET_SIZE,
 ):
     """
-    Build the shared simulation environment once and cache the static setup.
+    Load the persisted setup and build the runtime environment for the app.
     """
-    return build_simulation_environment(
-        SimulationEnvironmentConfig(
+    if _SETUP_PATH_EXISTS:
+        setup = load_simulation_setup(SIMULATION_SETUP_JSON)
+    else:
+        setup = load_or_build_simulation_setup(
+            SimulationSetupConfig(
+                route_count=DEFAULT_SIMULATION_CORRIDOR_COUNT,
+                sim_hour=DEFAULT_CORRIDOR_SIM_HOUR,
+                use_automated_swap=use_auto_swap,
+            ),
+            path=SIMULATION_SETUP_JSON,
+            persist_if_built=True,
+        )
+    return build_runtime_environment(
+        setup,
+        SimulationRuntimeConfig(
             demand_scale=demand_scale,
-            use_automated_swap=use_auto_swap,
             pad_override=pad_override,
             fleet_size=fleet_size,
-        )
+        ),
     )
 
 
@@ -330,11 +358,20 @@ with st.sidebar:
     )
 
     demand_scale = st.slider(
-        f"📦 Demand scale (×baseline {NETWORK_PEAK_ORDERS_PER_HOUR:.0f}/hr)",
+        f"📦 Demand scale (×baseline {_SETUP_BASELINE_ORDERS_PER_HOUR:.0f}/hr)",
         min_value=0.5, max_value=3.0, value=float(DEFAULT_DEMAND_SCALE), step=0.1,
     )
 
-    use_auto_swap = st.toggle("🤖 Automated battery swap (3.5 min)", value=False)
+    use_auto_swap = st.toggle(
+        "🤖 Automated battery swap (3.5 min)",
+        value=False,
+        disabled=_SETUP_PATH_EXISTS,
+        help=(
+            f"Disabled while using persisted setup at {SIMULATION_SETUP_JSON}."
+            if _SETUP_PATH_EXISTS
+            else "Rebuild the network setup with the faster service-time assumption."
+        ),
+    )
 
     pad_override = st.slider(
         "▣ Pad count override (0 = use M/G/k recommendation)",

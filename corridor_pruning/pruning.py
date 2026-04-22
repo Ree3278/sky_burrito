@@ -342,15 +342,6 @@ MISSING_INPUTS = """
 MISSING INPUTS — items that will materially improve filter accuracy
 ===================================================================
 
-1. Per-route obstacle heights  [CRITICAL]
-   What:  Max building height directly under each of the 132 flight paths.
-   Why:   Currently all corridors use ASSUMED_CRUISE_ALTITUDE_M = 120 m.
-          A flat Mission→Noe route might only need 30 m; a Mission Bay→Nob Hill
-          route might need 80 m. The climb cost difference is large.
-   How:   Intersect each corridor's LineString with mission_noe_buildings.geojson
-          using geopandas.sjoin or shapely.intersection, then take max(hgt_median_m).
-   Code:  Add get_obstacle_height(hub_a, hub_b, buildings_gdf) → float
-          to this package, then call it in corridors.py at generation time.
 
 2. Real ground transit times   [HIGH]
    What:  Actual OSMnx shortest-path distances and travel times per corridor.
