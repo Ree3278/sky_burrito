@@ -30,18 +30,15 @@ Missing inputs
 
 from dataclasses import dataclass
 
-# ── Stub service time parameters ─────────────────────────────────────────────
-
-APPROACH_S      =  30.0   # seconds
-UNLOAD_S        =  60.0   # seconds
-BATTERY_SWAP_S  = 180.0   # seconds  ← biggest lever; automated → ~60 s
-LOAD_NEXT_S     =  60.0   # seconds
-
-# Coefficient of variation squared.
-# 1.0 = exponential service (M/M/k special case, pessimistic).
-# 0.25 = low variance (well-managed swap, closer to deterministic).
-# ⚠ Replace with measured data.
-CV_SQUARED: float = 1.0
+from settings.service import (
+    APPROACH_S,
+    UNLOAD_S,
+    BATTERY_SWAP_S,
+    LOAD_NEXT_S,
+    AUTOMATED_BATTERY_SWAP_S,
+    CV_SQUARED,
+    AUTOMATED_CV_SQUARED,
+)
 
 
 @dataclass
@@ -66,5 +63,5 @@ def default_service_spec() -> ServiceSpec:
 
 def automated_service_spec() -> ServiceSpec:
     """Optimistic: DJI Dock-style automated battery swap."""
-    mean = APPROACH_S + UNLOAD_S + 60.0 + LOAD_NEXT_S   # 60 s swap
-    return ServiceSpec(mean_s=mean, cv_squared=0.25, is_stub=True)
+    mean = APPROACH_S + UNLOAD_S + AUTOMATED_BATTERY_SWAP_S + LOAD_NEXT_S
+    return ServiceSpec(mean_s=mean, cv_squared=AUTOMATED_CV_SQUARED, is_stub=True)

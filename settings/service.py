@@ -1,0 +1,12 @@
+"""Service-time tunables for M/G/k sizing."""
+
+APPROACH_S = 30.0
+UNLOAD_S = 60.0
+BATTERY_SWAP_S = 180.0
+LOAD_NEXT_S = 60.0
+
+AUTOMATED_BATTERY_SWAP_S = 60.0
+
+CV_SQUARED: float = 1.0
+AUTOMATED_CV_SQUARED: float = 0.25
+

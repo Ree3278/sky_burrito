@@ -23,13 +23,10 @@ from math import floor
 from typing import Dict, Iterable, List, Mapping, TYPE_CHECKING
 
 from corridor_pruning.hubs import HUB_LOOKUP
+from settings.simulation import DEFAULT_FLEET_SIZE
 
 if TYPE_CHECKING:
     from hub_sizing.sizing import HubSizingResult
-
-
-DEFAULT_FLEET_SIZE = 30
-
 
 @dataclass(frozen=True)
 class FleetSnapshot:
@@ -88,7 +85,7 @@ class FleetPool:
         total_fleet_size: int = DEFAULT_FLEET_SIZE,
     ) -> "FleetPool":
         """
-        Seed a finite fleet across active hubs using hub match_score weights.
+        Seed a finite fleet across active hubs using sizing-derived demand weights.
 
         Active hubs are taken from hub sizing results because those are the hubs
         currently in the simulated network. Allocation uses largest-remainder
@@ -100,11 +97,17 @@ class FleetPool:
         if total_fleet_size <= 0:
             raise ValueError("total_fleet_size must be positive")
 
-        weights = {
-            hub_id: float(HUB_LOOKUP[hub_id].match_score)
-            for hub_id in active_hub_ids
-            if hub_id in HUB_LOOKUP
-        }
+        results_by_hub = {result.hub_id: result for result in hub_sizing_results}
+        weights = {}
+        for hub_id in active_hub_ids:
+            result = results_by_hub.get(hub_id)
+            if result is None:
+                continue
+            sizing_weight = max(float(result.offered_load), float(result.lambda_per_hour), 0.0)
+            if sizing_weight <= 0 and hub_id in HUB_LOOKUP:
+                sizing_weight = float(HUB_LOOKUP[hub_id].match_score)
+            weights[hub_id] = sizing_weight
+
         if len(weights) != len(active_hub_ids):
             missing = sorted(set(active_hub_ids) - set(weights))
             raise KeyError(f"Missing hub metadata for hub ids: {missing}")

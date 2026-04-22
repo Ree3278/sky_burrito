@@ -37,6 +37,13 @@ from .drone_model import estimate_drone, DroneSpec
 from .ground_model import estimate_ground
 from .driver_economics import DriverEconomicsSpec
 from .carbon_footprint import calculate_carbon_savings
+from settings.paths import BUILDINGS_CSV
+from settings.pipeline import (
+    DEFAULT_CORRIDOR_SIM_HOUR,
+    DEFAULT_MIN_DEMAND_WEIGHT,
+    DEFAULT_MIN_TIME_DELTA_S,
+    DEFAULT_PRUNED_CORRIDOR_COUNT,
+)
 
 if TYPE_CHECKING:
     import networkx as nx
@@ -45,14 +52,14 @@ if TYPE_CHECKING:
 
 # Minimum time the drone must beat the car to justify the route.
 # Below this the infrastructure cost isn't worth it.
-MIN_TIME_DELTA_S    = 120   # 2 minutes  ← tune once real traffic data arrives
+MIN_TIME_DELTA_S    = DEFAULT_MIN_TIME_DELTA_S
 
 # Minimum combined supply–demand score.
 # Filters out low-traffic hub pairs that won't generate enough orders.
-MIN_DEMAND_WEIGHT   = 100_000   # restaurants_nearby(origin) × resunits_nearby(destination)
+MIN_DEMAND_WEIGHT   = DEFAULT_MIN_DEMAND_WEIGHT
 
 # Maximum number of corridors to keep after ranking.
-TOP_N_CORRIDORS     = 20
+TOP_N_CORRIDORS     = DEFAULT_PRUNED_CORRIDOR_COUNT
 
 
 @dataclass
@@ -104,7 +111,7 @@ def score_corridor(
     drone_spec: DroneSpec = DroneSpec(),
     driver_spec: DriverEconomicsSpec = DriverEconomicsSpec(),
     G: "Optional[nx.MultiDiGraph]" = None,
-    sim_hour: int = 19,
+    sim_hour: int = DEFAULT_CORRIDOR_SIM_HOUR,
 ) -> ScoredCorridor:
     """
     Run both models against a single Corridor and return a ScoredCorridor.
@@ -195,11 +202,11 @@ def prune_corridors(
     drone_spec: DroneSpec = DroneSpec(),
     driver_spec: DriverEconomicsSpec = DriverEconomicsSpec(),
     G: "Optional[nx.MultiDiGraph]" = None,
-    sim_hour: int = 19,
+    sim_hour: int = DEFAULT_CORRIDOR_SIM_HOUR,
     min_time_delta_s: int  = MIN_TIME_DELTA_S,
     min_demand_weight: int = MIN_DEMAND_WEIGHT,
     top_n: int             = TOP_N_CORRIDORS,
-    buildings_csv: Optional[str] = "Building_Footprints_20260410.csv",
+    buildings_csv: Optional[str] = str(BUILDINGS_CSV),
 ) -> List[ScoredCorridor]:
     """
     Score all 132 corridors, apply filters, rank by composite score.

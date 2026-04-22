@@ -28,16 +28,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, TYPE_CHECKING
 
+from settings.pipeline import NETWORK_PEAK_ORDERS_PER_HOUR
+
 if TYPE_CHECKING:
     from corridor_pruning.pruning import ScoredCorridor
     from corridor_pruning.hubs import Hub
 
 # ── Stub parameters ──────────────────────────────────────────────────────────
-
-# Total drones landing across all hubs during the 1-hour peak window.
-# Rough basis: 10 active hubs × ~20 orders/hub/hr = 200.
-# ⚠ Replace with NHPP simulation output.
-NETWORK_PEAK_ORDERS_PER_HOUR: float = 200.0
 
 # Ratio of peak-hour volume to the flat average used above.
 # Friday 7–9 PM in SF food delivery is ~2–3× the daily average.

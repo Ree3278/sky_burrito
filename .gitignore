@@ -4,3 +4,5 @@ node_modules/
 __pycache__/
 .venv
 Building_Footprints_20260410.csv
+data/
+cache/

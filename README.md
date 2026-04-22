@@ -117,15 +117,18 @@ Demand is simulated using a **Non-Homogeneous Poisson Process** to model Friday-
 ## Setup
 
 ```bash
-pip install pandas geopandas shapely scikit-learn osmnx matplotlib
+uv sync
 ```
 
-You will also need the three raw CSV data files in the project root (not committed to the repo due to size):
-- `Registered_Business_Locations_-_San_Francisco_20260410.csv`
-- `Building_Footprints_20260410.csv`
-- `San_Francisco_Land_Use_-_2023_20260410.csv`
+Create a `data/` directory in the project root and place the three raw CSV files there
+(they are not committed to the repo due to size):
 
-Run `group_project.ipynb` first to generate the GeoJSON intermediates, then `group_project_visuilzation.ipynb` for analysis and hub optimization.
+- `data/Registered_Business_Locations_-_San_Francisco_20260410.csv`
+- `data/Building_Footprints_20260410.csv`
+- `data/San_Francisco_Land_Use_-_2023_20260410.csv`
+
+The committed GeoJSON files in the repo root are derived artifacts. The raw-data
+entrypoint is now `main.py`, not the old notebook-first flow.
 
 ---
 
@@ -167,17 +170,41 @@ Run `group_project.ipynb` first to generate the GeoJSON intermediates, then `gro
 
 ---
 
+## Entrypoints
+
+`main.py` is the top-level CLI for the repo. These are the supported entrypoints:
+
+```bash
+# 1. Raw-data ingest, hub siting, walk-zone scoring, chart generation
+uv run python main.py siting
+
+# Backwards-compatible form: still runs the siting pipeline
+uv run python main.py --hubs 8 --skip-street-network
+
+# 2. Corridor pruning and ranked top-route report
+uv run python main.py corridors --top-n 20 --sim-hour 19
+
+# 3. Corridor pruning + M/G/k hub sizing report
+uv run python main.py sizing --top-n 10 --sim-hour 19
+
+# 4. Streamlit digital twin / live simulation
+uv run python main.py simulate
+```
+
 ## Quick Start
 
 ```bash
-# Run the analysis and see top 20 corridors
-python -c "from corridor_pruning.pruning import prune_corridors; prune_corridors()"
+# Run the siting pipeline end-to-end
+uv run python main.py siting --skip-street-network
 
-# Get results with CO₂ data
-results = prune_corridors()
-top = results[0]
-print(f"Savings: ${top.cost_arbitrage_usd:.2f}")
-print(f"CO₂ reduced: {top.co2_reduction_pct:.1f}%")
+# Print the top shortlisted corridors
+uv run python main.py corridors
+
+# Print the hub sizing report
+uv run python main.py sizing
+
+# Launch the live simulation
+uv run python main.py simulate
 ```
 
 ---

@@ -32,18 +32,16 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from corridor_pruning.pruning import prune_corridors
-from corridor_pruning.hubs import HUB_LOOKUP
-from hub_sizing.sizing import size_hubs
-from hub_sizing.service import default_service_spec, automated_service_spec
-
 from simulation.config import (
     MAP_BEARING, MAP_CENTER_LAT, MAP_CENTER_LON, MAP_STYLE, MAP_ZOOM, MAP_PITCH,
     TIME_MULTIPLIER, TICK_REAL_S,
 )
 from simulation.clock import SimClock
-from simulation.dispatcher import Dispatcher
-from simulation.registry import DroneRegistry
+from simulation.environment import (
+    SimulationEnvironmentConfig,
+    build_simulation_environment,
+    create_registry,
+)
 from simulation.rl_bridge import RLBridge
 from simulation.layers import (
     corridor_arc_layer,
@@ -53,6 +51,8 @@ from simulation.layers import (
     drone_layer,
     craning_ring_layer,
 )
+from settings.pipeline import DEFAULT_DEMAND_SCALE, NETWORK_PEAK_ORDERS_PER_HOUR
+from settings.simulation import DEFAULT_FLEET_SIZE, RL_FLEET_SIZES
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -286,21 +286,23 @@ st.markdown(
 
 # ── Cache expensive startup work ──────────────────────────────────────────────
 @st.cache_resource
-def load_network(demand_scale: float = 1.0, use_auto_swap: bool = False):
+def load_environment(
+    demand_scale: float = 1.0,
+    use_auto_swap: bool = False,
+    pad_override: int = 0,
+    fleet_size: int = DEFAULT_FLEET_SIZE,
+):
     """
-    Run corridor pruning + hub sizing once and cache the results.
-    Re-runs if demand_scale or use_auto_swap changes.
+    Build the shared simulation environment once and cache the static setup.
     """
-    shortlist = prune_corridors()
-    top_routes = shortlist[:10]
-    spec = automated_service_spec() if use_auto_swap else default_service_spec()
-    sizing = size_hubs(top_routes, service_spec=spec)
-    active_hub_ids = sorted(
-        {route.corridor.origin.id for route in top_routes}
-        | {route.corridor.destination.id for route in top_routes}
+    return build_simulation_environment(
+        SimulationEnvironmentConfig(
+            demand_scale=demand_scale,
+            use_automated_swap=use_auto_swap,
+            pad_override=pad_override,
+            fleet_size=fleet_size,
+        )
     )
-    hubs_lookup = {hub_id: HUB_LOOKUP[hub_id] for hub_id in active_hub_ids}
-    return top_routes, sizing, hubs_lookup, active_hub_ids
 
 
 @st.cache_resource
@@ -323,13 +325,13 @@ with st.sidebar:
 
     time_mult = st.slider(
         "⏩ Time multiplier",
-        min_value=1, max_value=120, value=60, step=1,
+        min_value=1, max_value=120, value=int(TIME_MULTIPLIER), step=1,
         help="1 real second = N simulation seconds",
     )
 
     demand_scale = st.slider(
-        "📦 Demand scale (×baseline 200/hr)",
-        min_value=0.5, max_value=3.0, value=1.0, step=0.1,
+        f"📦 Demand scale (×baseline {NETWORK_PEAK_ORDERS_PER_HOUR:.0f}/hr)",
+        min_value=0.5, max_value=3.0, value=float(DEFAULT_DEMAND_SCALE), step=0.1,
     )
 
     use_auto_swap = st.toggle("🤖 Automated battery swap (3.5 min)", value=False)
@@ -353,7 +355,7 @@ with st.sidebar:
     )
     rl_fleet_size = st.select_slider(
         "Fleet size (model variant)",
-        options=[10, 20, 30, 40, 50],
+        options=list(RL_FLEET_SIZES),
         value=20,
         help="Which trained model variant to use. Fleet 20 ran the full 3-phase curriculum.",
         disabled=not rl_enabled,
@@ -389,12 +391,17 @@ if "rl_bridge" not in st.session_state:
     st.session_state.rl_bridge = None
 
 # ── Button logic ─────────────────────────────────────────────────────────────
-top_routes, sizing, active_hubs_lookup, active_hub_ids = load_network(demand_scale, use_auto_swap)
-
-if pad_override > 0:
-    for r in sizing:
-        r.k_pads = pad_override
-        r.k_bays = pad_override
+fleet_size = rl_fleet_size if rl_enabled else DEFAULT_FLEET_SIZE
+environment = load_environment(
+    demand_scale=demand_scale,
+    use_auto_swap=use_auto_swap,
+    pad_override=pad_override,
+    fleet_size=fleet_size,
+)
+top_routes = environment.routes
+sizing = environment.sizing_results
+active_hubs_lookup = environment.hubs_lookup
+active_hub_ids = environment.active_hub_ids
 
 if "selected_route_label" not in st.session_state and top_routes:
     st.session_state.selected_route_label = top_routes[0].corridor.label
@@ -412,16 +419,8 @@ def _selected_route():
 
 if btn_reset or (btn_start and st.session_state.registry is None):
     clock = SimClock(time_multiplier=time_mult)
-    dispatcher = Dispatcher(
-        shortlist=top_routes,
-        lambda_per_sim_s=(200 * demand_scale) / 3600,
-    )
     bridge = load_rl_bridge(fleet_size=rl_fleet_size, enabled=rl_enabled)
-    registry = DroneRegistry(
-        hub_sizing_results=sizing,
-        dispatcher=dispatcher,
-        rl_bridge=bridge if rl_enabled else None,
-    )
+    registry = create_registry(environment, rl_bridge=bridge if rl_enabled else None)
     st.session_state.clock     = clock
     st.session_state.registry  = registry
     st.session_state.rl_bridge = bridge

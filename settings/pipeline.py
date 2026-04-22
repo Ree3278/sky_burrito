@@ -1,0 +1,12 @@
+"""Pipeline-level tunables for pruning, sizing, and simulation setup."""
+
+DEFAULT_CORRIDOR_SIM_HOUR: int = 19
+DEFAULT_MIN_TIME_DELTA_S: int = 120
+DEFAULT_MIN_DEMAND_WEIGHT: int = 100_000
+
+DEFAULT_PRUNED_CORRIDOR_COUNT: int = 20
+DEFAULT_SIMULATION_CORRIDOR_COUNT: int = 10
+
+NETWORK_PEAK_ORDERS_PER_HOUR: float = 100.0
+DEFAULT_DEMAND_SCALE: float = 1.0
+
