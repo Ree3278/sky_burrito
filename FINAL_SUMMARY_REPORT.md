@@ -17,6 +17,27 @@ The current codebase is no longer just exploratory notebook work. It is now a mo
 
 The biggest recent operational takeaway is that the simulation path is now concrete enough to treat dispatching as a real modeled stage rather than a placeholder idea. The dispatcher is still a stub NHPP, but its rules are clear, reproducible, and already wired into the live app.
 
+## 1A. Story-Based Summary For Slides Or Presentation
+
+If we had to explain the project without starting from code, the story is simple: we are not trying to prove that drones can deliver food everywhere. We are trying to identify the small set of situations where drones make operational sense and then design a network around those situations.
+
+Our core heuristic is that drones are only valuable when they solve a real urban friction problem. In a dense city like San Francisco, ground delivery is slowed down by road geometry, intersections, hills, and congestion, while drones can travel much closer to a straight line. So the project begins by asking a business question, not an aviation question: where does the city create enough friction on the ground that an aerial shortcut becomes worth it?
+
+From there, the project follows a sequence of practical filters. First, we look for places with restaurant activity, because hubs only matter if they are near supply. Second, we look for nearby residential demand within a reasonable walking distance, because the system is designed around a hub-to-kiosk model rather than door-to-door drone dropoff. Third, we test which hub-to-hub corridors save enough time over ground travel to justify flying at all. Fourth, we ask whether those promising corridors carry enough demand to matter commercially. Finally, we size the hubs so that the network can actually absorb peak demand without creating excessive waiting in the air.
+
+That means the project is really built on a chain of heuristics:
+
+- Put hubs near clusters of restaurants.
+- Prefer hubs that also cover dense residential areas within a 5-minute walk.
+- Keep only corridors where drones produce meaningful time savings.
+- Penalize corridors that consume too much energy relative to the benefit.
+- Prioritize corridors where origin supply and destination demand are both strong.
+- Size hub infrastructure around reliability, especially avoiding too much craning during peaks.
+
+So the value of Sky Burrito is not just that it simulates drones. The value is that it gives us a decision framework. It helps answer: where should we place hubs, which links are worth operating, and how much infrastructure do we need before the system breaks under real demand?
+
+For an audience, the takeaway is that this is a selective network design problem. We are deliberately narrowing from "all possible drone routes" to "the few routes that are fast enough, useful enough, and reliable enough to justify operation." That is the role of the heuristics in this project: not to make the model simplistic, but to make the concept operational.
+
 ## 2. What Was Verified
 
 This report was built from the current source code and a local smoke run of the runnable analytical path.
